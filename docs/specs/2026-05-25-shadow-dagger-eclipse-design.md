@@ -1,4 +1,4 @@
-# Shadow Dagger: ECLIPSE — 설계 문서
+# MBHG: ECLIPSE — 설계 문서
 
 작성일: 2026-05-25
 원본: https://studyemomo-blip.github.io/pr1.github.io/ (Shadow Dagger)
