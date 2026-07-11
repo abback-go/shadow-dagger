@@ -41,6 +41,7 @@ const SKILL = {
   bolt:    { cd: 0.22, dmg: [9, 13], speed: 820, range: 520, name: "불티" },
   fireball:{ cdAfter: 0.55, mp: 15, minCharge: 0.15, maxCharge: 0.9,
              dmg: [22, 30], dmgMaxMul: 2.4, speed: 640, name: "화염구" },
+  field:   { cd: 6, mp: 20, dur: 4.0, tick: 0.35, dmg: [6, 9], width: 150, name: "화염 장판" },
 };
 const CRIT_MUL = 1.5;
 
@@ -168,7 +169,7 @@ const platforms = [
 
 const signs = [
   { x: 240,  text: "← → 이동  /  Space 점프" },
-  { x: 620,  text: "Z: 불티 (기본 마법)  — 허수아비에 연습!" },
+  { x: 640,  text: "Z: 불티 (기본 마법)  — 허수아비에 연습!" },
   { x: 1000, text: "발판 위에서 ↓+Space: 아래로 내려가기" },
   { x: 1420, text: "Shift: 대시 (짧은 무적!)" },
   { x: 1700, text: "X 누르고 있기: 화염구 차지 → 놓으면 발사!" },
@@ -187,7 +188,7 @@ const player = {
   x: 140, y: GROUND_Y, vx: 0, vy: 0, facing: 1,
   onGround: false, dropTimer: 0,
   dashTimer: 0, dashCd: 0, dashDir: 1,
-  boltCd: 0, fbCharge: -1, fbCd: 0,       // fbCharge<0 = 비차지
+  boltCd: 0, fbCharge: -1, fbCd: 0, fieldCd: 0,   // fbCharge<0 = 비차지
   hp: P.maxHp, mp: P.maxMp,
   level: 1, exp: 0,
   // 스탯 랭크: r = RANKS 인덱스(1 = "D", 휴먼 시작), tp = 수련치, act = 행동 성장 누적
@@ -272,13 +273,132 @@ function questEvent(type, target){
 function completeQuest(){
   const q = QUESTS[questState.idx];
   const rewardText = q.rewards.map(([k,s])=>`${STAT_DEFS[k].name} 수련치 [${s}]`).join("   ");
-  questState.banner = { name: q.name, rewards: rewardText, exp: q.exp, t: 0, life: 3.4 };
+  questBanner(`퀘스트 완료!  — ${q.name}`, `보상: ${rewardText}   EXP +${q.exp}`, "Tab: 학생 수첩에서 스탯 확인");
   for(const [k,s] of q.rewards) trainStat(k, TRAIN_SIZE[s], false);
   gainExp(q.exp);
   juice.flash = Math.max(juice.flash, 0.2);
   questState.idx++;
   questState.prog = 0;
   if(questState.idx >= QUESTS.length) questState.doneAll = true;
+  saveGame();
+}
+function questBanner(title, sub, sub2){
+  questState.banner = { title, sub, sub2, t: 0, life: 3.4 };
+}
+
+// ============================== 수업 & NPC ==============================
+// 수업 = 스킬 습득 콘텐츠 (기획서 §7): 교수에게 배우고 과제로 정식 습득
+const PROF = { x: 430, name: "아그니스 교수" };
+const LESSON = {
+  name: "기초 화염진", skill: "화염 장판", need: 20,
+  rewardText: "마력 수련치 [대]  정신 수련치 [소]  EXP +60",
+};
+const lessonState = { status: "avail", prog: 0 };   // avail → active → done
+let dialog = null;
+function startDialog(lines, onEnd){ dialog = { lines, i: 0, onEnd: onEnd || null }; }
+function advanceDialog(){
+  if(!dialog) return;
+  dialog.i++;
+  if(dialog.i >= dialog.lines.length){
+    const cb = dialog.onEnd; dialog = null;
+    if(cb) cb();
+  }
+}
+function talkToProf(){
+  if(lessonState.status === "avail"){
+    startDialog([
+      "오, 신입생이군! 나는 화염술 담당 아그니스 교수다.",
+      "오늘 수업은 「화염 장판」 — 지면에 마력을 태워 새기는 기초 화염진이지.",
+      "임시로 술식을 각인해주마. C 키로 시전해 보게. (MP 20)",
+      "과제: 화염 장판의 불길로 몬스터를 20회 지지면 합격이다!",
+    ], ()=>{
+      lessonState.status = "active";
+      addFloatText(player.x, player.y - P.h - 60, "수업 시작: " + LESSON.name, "#8be9fd");
+      addFloatText(player.x, player.y - P.h - 34, "임시 습득: 화염 장판 (C)", "#ffb35c");
+      saveGame();
+    });
+  }else if(lessonState.status === "active"){
+    startDialog([
+      `아직 과제가 남았네. 장판 적중 ${lessonState.prog}/${LESSON.need}!`,
+      "숲의 슬라임들에게 시험해 보게. 발밑에 깔고 유인하는 게 요령이다.",
+    ]);
+  }else{
+    startDialog([
+      "훌륭한 화염진이었다. 이제 그 술식은 완전히 자네 것이야.",
+      "다음 수업도 기대하지, 견습생.",
+    ]);
+  }
+}
+function lessonComplete(){
+  lessonState.status = "done";
+  questBanner(`수업 이수!  — ${LESSON.name}`,
+              `신규 스킬 정식 습득: ${LESSON.skill} (C)`,
+              "보상: " + LESSON.rewardText);
+  trainStat("mag", TRAIN_SIZE["대"], false);
+  trainStat("wil", TRAIN_SIZE["소"], false);
+  gainExp(60);
+  saveGame();
+}
+
+// --- 화염 장판 (수업으로 습득하는 설치기)
+const fields = [];
+function castField(){
+  const pl = player;
+  pl.fieldCd = SKILL.field.cd;
+  pl.mp -= SKILL.field.mp;
+  const fy = pl.onGround ? pl.y : GROUND_Y;
+  fields.push({ x: pl.x + pl.facing * 90, y: fy, t: 0, tickT: 0, w: SKILL.field.width });
+  juice.addShake(0.1);
+  spawnParticles(pl.x + pl.facing*90, fy - 6, { n: 12, col: ["#ff7b3a","#ffd27f"], sp0: 40, sp1: 160, l0: .2, l1: .5, add: true, grav: -120 });
+}
+function updateFields(dt){
+  for(let i=fields.length-1;i>=0;i--){
+    const f = fields[i];
+    f.t += dt; f.tickT += dt;
+    if(Math.random() < 0.3)
+      spawnParticles(f.x + rand(-f.w/2, f.w/2), f.y - rand(0, 12), { n: 1, col: ["#ff7b3a","#ffb35c","#ffe08a"], sp0: 10, sp1: 60, l0: .2, l1: .5, add: true, grav: -160, r0: 2, r1: 4 });
+    if(f.tickT >= SKILL.field.tick){
+      f.tickT -= SKILL.field.tick;
+      for(const m of monsters){
+        if(m.dead) continue;
+        const d = MOB_DEFS[m.type];
+        if(Math.abs(m.y - f.y) > 60) continue;
+        if(m.x + d.w/2 < f.x - f.w/2 || m.x - d.w/2 > f.x + f.w/2) continue;
+        hitMonster(m, Math.floor(irand(SKILL.field.dmg[0], SKILL.field.dmg[1]) * magMul()),
+                   20 * sign(m.x - f.x || 1), { type: "field", hitstop: 0.004, shake: 0.015 });
+      }
+    }
+    if(f.t >= SKILL.field.dur) fields.splice(i,1);
+  }
+}
+
+// ============================== SAVE (localStorage) ==============================
+const SAVE_KEY = "arcane_proto_save_v1";
+let saveTimer = 8, saveFlash = 0, resetArm = 0;
+function saveGame(){
+  try{
+    localStorage.setItem(SAVE_KEY, JSON.stringify({
+      v: 1, level: player.level, exp: player.exp, stats: player.stats,
+      quest: { idx: questState.idx, prog: questState.prog, doneAll: questState.doneAll },
+      lesson: { status: lessonState.status, prog: lessonState.prog },
+      x: Math.round(player.x), best: combo.best,
+    }));
+    saveFlash = 1.4;
+  }catch(e){ /* 시크릿 모드 등 저장 불가 환경 무시 */ }
+}
+function loadGame(){
+  try{
+    const d = JSON.parse(localStorage.getItem(SAVE_KEY) || "null");
+    if(!d || d.v !== 1) return;
+    player.level = d.level; player.exp = d.exp;
+    for(const k in player.stats) if(d.stats && d.stats[k]) player.stats[k] = d.stats[k];
+    if(d.quest) Object.assign(questState, d.quest);
+    if(d.lesson) Object.assign(lessonState, d.lesson);
+    player.x = clamp(d.x || 140, P.w/2, MAP_W - P.w/2);
+    combo.best = d.best || 0;
+    player.hp = maxHp(); player.mp = maxMp();
+    addFloatText(player.x, GROUND_Y - 110, "이어하기 — 저장 데이터 불러옴", "#8be9fd");
+  }catch(e){}
 }
 
 function updatePlayer(dt){
@@ -289,9 +409,12 @@ function updatePlayer(dt){
     return;
   }
 
+  const locked = dialog !== null || showBook;   // 대화·수첩 중 조작 잠금
+
   // --- 타이머
   pl.boltCd = Math.max(0, pl.boltCd - dt);
   pl.fbCd   = Math.max(0, pl.fbCd - dt);
+  pl.fieldCd = Math.max(0, pl.fieldCd - dt);
   pl.dashCd = Math.max(0, pl.dashCd - dt);
   pl.dropTimer = Math.max(0, pl.dropTimer - dt);
   pl.iframes = Math.max(0, pl.iframes - dt);
@@ -301,7 +424,7 @@ function updatePlayer(dt){
   const charging = pl.fbCharge >= 0;
 
   // --- 대시
-  if(inp.dashP() && pl.dashCd <= 0 && !charging){
+  if(!locked && inp.dashP() && pl.dashCd <= 0 && !charging){
     pl.dashTimer = P.dashTime;
     pl.dashCd = P.dashCd * dashCdMul();
     trainStat("agi", 0.5, true);
@@ -318,7 +441,7 @@ function updatePlayer(dt){
     pl.trail.push({ x: pl.x, y: pl.y, t: 0.22, f: pl.facing });
   }else{
     // --- 좌우 이동
-    const mv = (inp.right()?1:0) - (inp.left()?1:0);
+    const mv = locked ? 0 : (inp.right()?1:0) - (inp.left()?1:0);
     const ctrl = pl.onGround ? 1 : P.airControl;
     const speedCap = (charging ? P.runSpeed * 0.4 : P.runSpeed) * agiSpeedMul();
     if(mv !== 0){
@@ -330,7 +453,7 @@ function updatePlayer(dt){
       if(Math.abs(pl.vx) <= f) pl.vx = 0; else pl.vx -= sign(pl.vx)*f;
     }
     // --- 점프 / 하강점프
-    if(inp.jumpP()){
+    if(!locked && inp.jumpP()){
       if(pl.onGround){
         if(inp.down() && pl.standingOneway){
           pl.dropTimer = P.dropTime;         // 플랫폼 통과
@@ -371,29 +494,39 @@ function updatePlayer(dt){
   }
 
   // --- 스킬: Z 불티
-  if(inp.boltP() && pl.boltCd <= 0 && !charging && pl.dashTimer <= 0){
+  if(!locked && inp.boltP() && pl.boltCd <= 0 && !charging && pl.dashTimer <= 0){
     pl.boltCd = SKILL.bolt.cd;
     fireBolt();
   }
 
   // --- 스킬: X 화염구(차지)
-  if(!charging && inp.fbHeld() && pl.fbCd <= 0 && pl.mp >= SKILL.fireball.mp && pl.dashTimer <= 0){
+  if(!locked && !charging && inp.fbHeld() && pl.fbCd <= 0 && pl.mp >= SKILL.fireball.mp && pl.dashTimer <= 0){
     pl.fbCharge = 0;
   }
   if(charging){
-    pl.fbCharge = Math.min(SKILL.fireball.maxCharge, pl.fbCharge + dt * chargeSpeedMul());
-    if((pl.fbCharge/SKILL.fireball.maxCharge) > 0.35 && Math.random() < 0.5){
-      spawnParticles(pl.x + pl.facing*24, pl.y - P.h*0.55, { n: 1, col: ["#ff9d4d","#ffd27f"], sp0: 10, sp1: 60, l0: .15, l1: .3, add: true });
-    }
-    if(!inp.fbHeld()){
-      const t = pl.fbCharge;
-      pl.fbCharge = -1;
-      if(t >= SKILL.fireball.minCharge){
-        pl.mp -= SKILL.fireball.mp;
-        pl.fbCd = SKILL.fireball.cdAfter;
-        fireFireball(t / SKILL.fireball.maxCharge);
+    if(locked){
+      pl.fbCharge = -1;   // 대화/수첩 열면 차지 취소
+    }else{
+      pl.fbCharge = Math.min(SKILL.fireball.maxCharge, pl.fbCharge + dt * chargeSpeedMul());
+      if((pl.fbCharge/SKILL.fireball.maxCharge) > 0.35 && Math.random() < 0.5){
+        spawnParticles(pl.x + pl.facing*24, pl.y - P.h*0.55, { n: 1, col: ["#ff9d4d","#ffd27f"], sp0: 10, sp1: 60, l0: .15, l1: .3, add: true });
+      }
+      if(!inp.fbHeld()){
+        const t = pl.fbCharge;
+        pl.fbCharge = -1;
+        if(t >= SKILL.fireball.minCharge){
+          pl.mp -= SKILL.fireball.mp;
+          pl.fbCd = SKILL.fireball.cdAfter;
+          fireFireball(t / SKILL.fireball.maxCharge);
+        }
       }
     }
+  }
+
+  // --- 스킬: C 화염 장판 (수업으로 습득)
+  if(!locked && pressed["c"] && lessonState.status !== "avail" &&
+     pl.fieldCd <= 0 && pl.mp >= SKILL.field.mp && pl.dashTimer <= 0 && pl.fbCharge < 0){
+    castField();
   }
 }
 
@@ -618,6 +751,10 @@ function hitMonster(m, baseDmg, kb, pr){
   // 퀘스트·행동 성장 훅
   if(pr.type === "bolt"){ questEvent("boltHit"); trainStat("mag", 0.5, true); }
   if(pr.type === "fireball") trainStat("mag", 1.0, true);
+  if(pr.type === "field" && lessonState.status === "active"){
+    lessonState.prog++;
+    if(lessonState.prog >= LESSON.need) lessonComplete();
+  }
   const r = mobRect(m);
   addDmgNumber(r.x + r.w/2, r.y - 6, dmg, crit);
   combo.hit();
@@ -639,9 +776,33 @@ let showHelp = true, showBook = false;
 function update(dt){
   if(inp.helpP()) showHelp = !showHelp;
   if(inp.bookP()) showBook = !showBook;
+
+  // --- 대화 / 상호작용 (E)
+  if(dialog){
+    if(pressed["e"] || pressed["z"] || pressed["space"]) advanceDialog();
+  }else if(pressed["e"] && !player.dead && Math.abs(player.x - PROF.x) < 60){
+    talkToProf();
+  }
+
+  // --- 자동 저장 / 초기화(F2 두 번)
+  saveTimer -= dt;
+  if(saveTimer <= 0){ saveTimer = 8; saveGame(); }
+  if(pressed["F2"]){
+    if(resetArm > 0){
+      try{ localStorage.removeItem(SAVE_KEY); }catch(e){}
+      location.reload();
+    }else{
+      resetArm = 3;
+      addFloatText(player.x, player.y - P.h - 60, "저장 초기화 — 3초 안에 F2 한 번 더!", "#f87171");
+    }
+  }
+  resetArm = Math.max(0, resetArm - dt);
+  saveFlash = Math.max(0, saveFlash - dt);
+
   updatePlayer(dt);
   updateMonsters(dt);
   updateProjectiles(dt);
+  updateFields(dt);
   updateParticles(dt);
   combo.update(dt);
   for(let i=explosions.length-1;i>=0;i--){
@@ -744,6 +905,24 @@ function render(){
     ctx.fillStyle = "#fdf2d0";
     ctx.fillText(s.text, s.x, GROUND_Y - 63);
   }
+
+  // --- 화염 장판
+  for(const f of fields){
+    const flick = 0.75 + Math.sin(f.t*30)*0.15;
+    const fade = f.t > SKILL.field.dur - 0.5 ? (SKILL.field.dur - f.t)/0.5 : 1;
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    ctx.globalAlpha = 0.55 * flick * fade;
+    const fg = ctx.createLinearGradient(0, f.y - 34, 0, f.y);
+    fg.addColorStop(0, "rgba(255,140,40,0)");
+    fg.addColorStop(1, "#ff8c3a");
+    ctx.fillStyle = fg;
+    ctx.fillRect(f.x - f.w/2, f.y - 34, f.w, 34);
+    ctx.restore();
+  }
+
+  // --- 교수 NPC
+  drawProfessor();
 
   // --- 몬스터
   for(const m of monsters){
@@ -874,6 +1053,48 @@ function render(){
   renderHUD();
 }
 
+function drawProfessor(){
+  const x = PROF.x, y = GROUND_Y;
+  // 로브 (보라)
+  ctx.fillStyle = "#5b3a8f";
+  ctx.fillRect(x - 16, y - 52, 32, 52);
+  ctx.fillStyle = "#472c73";
+  ctx.fillRect(x - 16, y - 12, 32, 12);
+  // 머리 + 수염
+  ctx.fillStyle = "#e8c9a0";
+  ctx.fillRect(x - 10, y - 66, 20, 16);
+  ctx.fillStyle = "#d1d5db";
+  ctx.fillRect(x - 8, y - 52, 16, 7);
+  // 모자
+  ctx.fillStyle = "#3b2566";
+  ctx.beginPath();
+  ctx.moveTo(x - 18, y - 64); ctx.lineTo(x + 18, y - 64); ctx.lineTo(x, y - 92);
+  ctx.closePath(); ctx.fill();
+  // 눈
+  ctx.fillStyle = "#1c1c28";
+  ctx.fillRect(x - 5, y - 61, 3, 4); ctx.fillRect(x + 2, y - 61, 3, 4);
+  // 상태 아이콘 (! 수업 가능 / ? 과제 중)
+  ctx.textAlign = "center";
+  const bob = Math.sin(performance.now()/300)*4;
+  if(lessonState.status === "avail"){
+    ctx.font = "bold 24px sans-serif"; ctx.fillStyle = "#fbbf24";
+    ctx.fillText("!", x, y - 102 + bob);
+  }else if(lessonState.status === "active"){
+    ctx.font = "bold 20px sans-serif"; ctx.fillStyle = "#8be9fd";
+    ctx.fillText("?", x, y - 102 + bob);
+  }
+  // 이름표
+  ctx.font = "11px sans-serif"; ctx.fillStyle = "#c4b5fd";
+  ctx.fillText(PROF.name, x, y + 16);
+  // E 프롬프트
+  if(!dialog && !player.dead && Math.abs(player.x - x) < 60){
+    ctx.fillStyle = "rgba(10,12,24,.8)";
+    roundRect(x - 32, y - 134, 64, 22, 6); ctx.fill();
+    ctx.font = "bold 13px sans-serif"; ctx.fillStyle = "#8be9fd";
+    ctx.fillText("E 대화", x, y - 118);
+  }
+}
+
 function drawPlayer(){
   const pl = player;
   if(pl.dead){
@@ -981,10 +1202,11 @@ function renderHUD(){
   ctx.fillText(`EXP ${pl.exp} / ${need}`, 36, 96);
 
   // --- 하단 중앙: 스킬 핫바
-  const hotbarX = VIEW_W/2 - 140, hotbarY = VIEW_H - 74;
+  const hotbarX = VIEW_W/2 - 139, hotbarY = VIEW_H - 74;
   drawSkillSlot(hotbarX,       hotbarY, "Z", "불티",   pl.boltCd / SKILL.bolt.cd, true);
   drawSkillSlot(hotbarX + 74,  hotbarY, "X", "화염구", pl.fbCd / SKILL.fireball.cdAfter, pl.mp >= SKILL.fireball.mp);
-  drawSkillSlot(hotbarX + 148, hotbarY, "Shift", "대시", pl.dashCd / P.dashCd, true);
+  drawSkillSlot(hotbarX + 148, hotbarY, "C", "화염장판", pl.fieldCd / SKILL.field.cd, pl.mp >= SKILL.field.mp, lessonState.status === "avail");
+  drawSkillSlot(hotbarX + 222, hotbarY, "Shift", "대시", pl.dashCd / P.dashCd, true);
 
   // --- 우측: 퀘스트 트래커
   {
@@ -1006,6 +1228,22 @@ function renderHUD(){
     }
   }
 
+  // --- 우측: 수업 트래커
+  if(lessonState.status !== "done"){
+    ctx.fillStyle = "rgba(10,12,24,.72)";
+    roundRect(VIEW_W - 316, 196, 300, 52, 10); ctx.fill();
+    ctx.font = "bold 13px sans-serif"; ctx.fillStyle = "#8be9fd";
+    if(lessonState.status === "avail"){
+      ctx.fillText("수업 가능!", VIEW_W - 302, 216);
+      ctx.font = "12px sans-serif"; ctx.fillStyle = "#cbd5e1";
+      ctx.fillText("시작 지점의 아그니스 교수에게 E", VIEW_W - 302, 236);
+    }else{
+      ctx.fillText(`수업 — ${LESSON.name}`, VIEW_W - 302, 216);
+      ctx.font = "12px sans-serif"; ctx.fillStyle = "#cbd5e1";
+      ctx.fillText(`장판(C)으로 몬스터 태우기  ${lessonState.prog} / ${LESSON.need}`, VIEW_W - 302, 236);
+    }
+  }
+
   // --- 중앙 배너: 퀘스트 완료
   if(questState.banner){
     const b = questState.banner, k = b.t / b.life;
@@ -1018,11 +1256,11 @@ function renderHUD(){
     ctx.strokeStyle = "#fbbf24"; ctx.lineWidth = 2;
     roundRect(VIEW_W/2 - 260, 150, 520, 92, 12); ctx.stroke();
     ctx.font = "bold 22px sans-serif"; ctx.fillStyle = "#fbbf24";
-    ctx.fillText(`퀘스트 완료!  — ${b.name}`, VIEW_W/2, 182);
+    ctx.fillText(b.title, VIEW_W/2, 182);
     ctx.font = "bold 14px sans-serif"; ctx.fillStyle = "#a3e635";
-    ctx.fillText(`보상: ${b.rewards}   EXP +${b.exp}`, VIEW_W/2, 210);
+    ctx.fillText(b.sub, VIEW_W/2, 210);
     ctx.font = "12px sans-serif"; ctx.fillStyle = "#94a3b8";
-    ctx.fillText("Tab: 학생 수첩에서 스탯 확인", VIEW_W/2, 230);
+    ctx.fillText(b.sub2, VIEW_W/2, 230);
     ctx.restore();
   }
 
@@ -1060,18 +1298,19 @@ function renderHUD(){
   if(showHelp){
     ctx.textAlign = "left";
     ctx.fillStyle = "rgba(10,12,24,.72)";
-    roundRect(16, VIEW_H - 168, 330, 148, 10); ctx.fill();
+    roundRect(16, VIEW_H - 192, 344, 172, 10); ctx.fill();
     ctx.font = "bold 13px sans-serif"; ctx.fillStyle = "#8be9fd";
-    ctx.fillText("조작법 (H: 접기/펼치기)", 30, VIEW_H - 144);
+    ctx.fillText("조작법 (H: 접기/펼치기)", 30, VIEW_H - 168);
     ctx.font = "13px sans-serif"; ctx.fillStyle = "#cbd5e1";
     const lines = [
-      "← →  이동   /  Space·↑  점프",
-      "↓+Space  발판 아래로 내려가기",
-      "Shift  대시 (무적 프레임)",
-      "Z  불티  /  X 홀드→놓기  화염구 (MP 15)",
-      "Tab  학생 수첩 — 스탯 랭크·퀘스트",
+      "← → 이동  /  Space·↑ 점프  /  ↓+Space 하강",
+      "Shift 대시 (무적)   /   E 대화·상호작용",
+      "Z 불티  /  X 홀드→놓기 화염구 (MP 15)",
+      "C 화염 장판 — 수업에서 습득! (MP 20)",
+      "Tab 학생 수첩 — 스탯 랭크·퀘스트",
+      "자동 저장 중  (F2 두 번: 데이터 초기화)",
     ];
-    lines.forEach((l, i)=> ctx.fillText(l, 30, VIEW_H - 120 + i*21));
+    lines.forEach((l, i)=> ctx.fillText(l, 30, VIEW_H - 144 + i*21));
   }else{
     ctx.font = "12px sans-serif"; ctx.fillStyle = "rgba(203,213,225,.5)";
     ctx.fillText("H: 조작법", 20, VIEW_H - 16);
@@ -1079,6 +1318,22 @@ function renderHUD(){
 
   // --- 학생 수첩 (Tab)
   if(showBook) renderBook();
+
+  // --- 대화창
+  if(dialog){
+    ctx.textAlign = "left";
+    ctx.fillStyle = "rgba(10,12,24,.92)";
+    roundRect(VIEW_W/2 - 370, VIEW_H - 214, 740, 118, 12); ctx.fill();
+    ctx.strokeStyle = "#7c5cbf"; ctx.lineWidth = 2;
+    roundRect(VIEW_W/2 - 370, VIEW_H - 214, 740, 118, 12); ctx.stroke();
+    ctx.font = "bold 15px sans-serif"; ctx.fillStyle = "#c4b5fd";
+    ctx.fillText(PROF.name, VIEW_W/2 - 344, VIEW_H - 184);
+    ctx.font = "15px sans-serif"; ctx.fillStyle = "#e2e8f0";
+    ctx.fillText(dialog.lines[dialog.i], VIEW_W/2 - 344, VIEW_H - 152);
+    ctx.textAlign = "right";
+    ctx.font = "12px sans-serif"; ctx.fillStyle = "#64748b";
+    ctx.fillText(`E ▸  (${dialog.i+1}/${dialog.lines.length})`, VIEW_W/2 + 344, VIEW_H - 112);
+  }
 
   // --- 사망 오버레이
   if(pl.dead){
@@ -1094,7 +1349,14 @@ function renderHUD(){
   // 버전 표기
   ctx.textAlign = "right";
   ctx.font = "11px sans-serif"; ctx.fillStyle = "rgba(148,163,184,.55)";
-  ctx.fillText("아르카나 아카데미 프로토타입 v0.2 — 입문의 숲", VIEW_W - 14, 22);
+  ctx.fillText("아르카나 아카데미 프로토타입 v0.3 — 입문의 숲", VIEW_W - 14, 22);
+  // 저장 표시
+  if(saveFlash > 0){
+    ctx.globalAlpha = Math.min(1, saveFlash);
+    ctx.font = "12px sans-serif"; ctx.fillStyle = "#4ade80";
+    ctx.fillText("✓ 자동 저장됨", VIEW_W - 14, VIEW_H - 14);
+    ctx.globalAlpha = 1;
+  }
   ctx.restore();
 }
 
@@ -1187,35 +1449,43 @@ function renderBook(){
   ctx.restore();
 }
 
-function drawSkillSlot(x, y, key, name, cdRatio, usable){
+function drawSkillSlot(x, y, key, name, cdRatio, usable, locked){
   const S = 56;
   ctx.save();
   ctx.fillStyle = "rgba(10,12,24,.78)";
   roundRect(x, y, S, S, 8); ctx.fill();
-  ctx.strokeStyle = usable ? "#64748b" : "#7f1d1d";
+  ctx.strokeStyle = locked ? "#334155" : usable ? "#64748b" : "#7f1d1d";
   ctx.lineWidth = 2;
   roundRect(x, y, S, S, 8); ctx.stroke();
-  // 아이콘(임시: 색 원)
-  const iconCol = name==="불티" ? "#ffb35c" : name==="화염구" ? "#ff6b3a" : "#8ab6ff";
-  ctx.fillStyle = usable ? iconCol : "#555";
-  ctx.beginPath(); ctx.arc(x + S/2, y + S/2 - 4, 13, 0, Math.PI*2); ctx.fill();
-  // 쿨다운 오버레이
-  const k = clamp(cdRatio, 0, 1);
-  if(k > 0){
-    ctx.fillStyle = "rgba(0,0,0,.62)";
-    ctx.beginPath();
-    ctx.moveTo(x + S/2, y + S/2);
-    ctx.arc(x + S/2, y + S/2, S*0.72, -Math.PI/2, -Math.PI/2 + Math.PI*2*k);
-    ctx.closePath();
-    ctx.save();
-    roundRect(x, y, S, S, 8); ctx.clip();
-    ctx.fill();
-    ctx.restore();
+  if(locked){
+    // 자물쇠 — 수업으로 해금
+    ctx.strokeStyle = "#94a3b8"; ctx.lineWidth = 2.5;
+    ctx.beginPath(); ctx.arc(x + S/2, y + S/2 - 10, 6, Math.PI, 0); ctx.stroke();
+    ctx.fillStyle = "#94a3b8";
+    ctx.fillRect(x + S/2 - 8, y + S/2 - 10, 16, 13);
+  }else{
+    // 아이콘(임시: 색 원)
+    const iconCol = name==="불티" ? "#ffb35c" : name==="화염구" ? "#ff6b3a" : name==="화염장판" ? "#ff8c3a" : "#8ab6ff";
+    ctx.fillStyle = usable ? iconCol : "#555";
+    ctx.beginPath(); ctx.arc(x + S/2, y + S/2 - 4, 13, 0, Math.PI*2); ctx.fill();
+    // 쿨다운 오버레이
+    const k = clamp(cdRatio, 0, 1);
+    if(k > 0){
+      ctx.fillStyle = "rgba(0,0,0,.62)";
+      ctx.beginPath();
+      ctx.moveTo(x + S/2, y + S/2);
+      ctx.arc(x + S/2, y + S/2, S*0.72, -Math.PI/2, -Math.PI/2 + Math.PI*2*k);
+      ctx.closePath();
+      ctx.save();
+      roundRect(x, y, S, S, 8); ctx.clip();
+      ctx.fill();
+      ctx.restore();
+    }
   }
   ctx.textAlign = "center";
-  ctx.font = "bold 11px sans-serif"; ctx.fillStyle = "#fbbf24";
+  ctx.font = "bold 11px sans-serif"; ctx.fillStyle = locked ? "#64748b" : "#fbbf24";
   ctx.fillText(key, x + S/2, y + 13);
-  ctx.font = "10px sans-serif"; ctx.fillStyle = "#cbd5e1";
+  ctx.font = "10px sans-serif"; ctx.fillStyle = locked ? "#64748b" : "#cbd5e1";
   ctx.fillText(name, x + S/2, y + S - 6);
   ctx.restore();
 }
@@ -1240,6 +1510,7 @@ function roundRect(x, y, w, h, r){
 }
 
 // ============================== MAIN LOOP ==============================
+loadGame();   // 저장 데이터 이어하기
 let last = performance.now(), acc = 0;
 function frame(now){
   requestAnimationFrame(frame);
