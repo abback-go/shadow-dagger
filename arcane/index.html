@@ -42,7 +42,20 @@ const SKILL = {
   fireball:{ cdAfter: 0.55, mp: 15, minCharge: 0.15, maxCharge: 0.9,
              dmg: [22, 30], dmgMaxMul: 2.4, speed: 640, name: "화염구" },
 };
-const CRIT_CHANCE = 0.15, CRIT_MUL = 1.5;
+const CRIT_MUL = 1.5;
+
+// --- 스탯 랭크 시스템 (D- ~ SSS) : 기획서 §6.1
+const RANKS = ["D-","D","D+","C-","C","C+","B-","B","B+","A-","A","A+","S","SS","SSS"];
+const RANK_NEED = [50,70,100,140,190,250,330,430,560,720,920,1200,1600,2200,Infinity]; // 다음 랭크까지 수련치
+const STAT_DEFS = {
+  str: { name:"근력", desc:"넉백·물리 위력" },
+  mag: { name:"마력", desc:"마법 데미지·최대 MP·차지 속도" },
+  agi: { name:"민첩", desc:"이동속도·대시 쿨·크리티컬" },
+  vit: { name:"체력", desc:"최대 HP·피해 감소" },
+  wil: { name:"정신", desc:"MP 회복·집중" },
+};
+const TRAIN_SIZE = { "소":25, "중":60, "대":120, "특대":250 };
+const ACTION_TRAIN_CAP = 40;   // 행동 성장(플레이로 단련) 스탯당 상한
 
 const MOB_DEFS = {
   dummy:    { name:"허수아비",   hp: 999999, w: 34, h: 56, speed: 0,   dmg: 0,  exp: 0,  color:"#9a7b4f", contact:false },
@@ -64,7 +77,7 @@ const sign  = v => v<0?-1:1;
 const keys = {};
 const pressed = {};   // 이번 프레임에 눌림(엣지)
 addEventListener("keydown", e=>{
-  if(["ArrowLeft","ArrowRight","ArrowUp","ArrowDown"," "].includes(e.key)) e.preventDefault();
+  if(["ArrowLeft","ArrowRight","ArrowUp","ArrowDown"," ","Tab"].includes(e.key)) e.preventDefault();
   const k = norm(e.key);
   if(!keys[k]) pressed[k] = true;
   keys[k] = true;
@@ -83,6 +96,7 @@ const inp = {
   boltP: ()=> pressed["z"],
   fbHeld:()=> keys["x"],
   helpP: ()=> pressed["h"],
+  bookP: ()=> pressed["Tab"],
 };
 
 // ============================== JUICE ==============================
@@ -176,12 +190,95 @@ const player = {
   boltCd: 0, fbCharge: -1, fbCd: 0,       // fbCharge<0 = 비차지
   hp: P.maxHp, mp: P.maxMp,
   level: 1, exp: 0,
+  // 스탯 랭크: r = RANKS 인덱스(1 = "D", 휴먼 시작), tp = 수련치, act = 행동 성장 누적
+  stats: {
+    str:{ r:1, tp:0, act:0 }, mag:{ r:1, tp:0, act:0 }, agi:{ r:1, tp:0, act:0 },
+    vit:{ r:1, tp:0, act:0 }, wil:{ r:1, tp:0, act:0 },
+  },
   iframes: 0, hurtFlash: 0, dead: false, deadTimer: 0,
   trail: [],
 };
 
 function playerRect(){
   return { x: player.x - P.w/2, y: player.y - P.h, w: P.w, h: P.h };
+}
+
+// ============================== 스탯 랭크 ==============================
+// 내부는 수치, 화면엔 랭크만 (기획서 §6.1.7)
+function rankIdx(k){ return player.stats[k].r; }
+function maxHp(){ return P.maxHp + (rankIdx("vit")-1)*10; }
+function maxMp(){ return P.maxMp + (rankIdx("mag")-1)*6; }
+function magMul(){ return 1 + (rankIdx("mag")-1)*0.06; }        // 마법 데미지
+function strMul(){ return 1 + (rankIdx("str")-1)*0.05; }        // 넉백/물리
+function critChance(){ return 0.12 + (rankIdx("agi")-1)*0.008; }
+function agiSpeedMul(){ return 1 + (rankIdx("agi")-1)*0.02; }
+function dashCdMul(){ return Math.max(0.5, 1 - (rankIdx("agi")-1)*0.03); }
+function wilRegenMul(){ return 1 + (rankIdx("wil")-1)*0.06; }
+function vitDmgMul(){ return Math.max(0.5, 1 - (rankIdx("vit")-1)*0.02); }
+function chargeSpeedMul(){ return 1 + (rankIdx("mag")-1)*0.04; }
+function rankColor(rank){
+  const c = rank[0];
+  if(rank === "SSS") return "#f472b6";
+  if(rank === "SS")  return "#fb923c";
+  if(rank === "S")   return "#fbbf24";
+  return c==="D" ? "#9ca3af" : c==="C" ? "#4ade80" : c==="B" ? "#60a5fa" : "#c084fc";
+}
+function overallRank(){
+  const keys = Object.keys(STAT_DEFS);
+  const avg = Math.round(keys.reduce((s,k)=>s+player.stats[k].r,0)/keys.length);
+  return RANKS[clamp(avg, 0, RANKS.length-1)];
+}
+
+const rankBanners = [];
+function trainStat(key, amount, fromAction){
+  const st = player.stats[key];
+  if(fromAction){
+    if(st.act >= ACTION_TRAIN_CAP) return;   // 행동 성장 상한
+    st.act += amount;
+  }
+  if(st.r >= RANKS.length-1) return;
+  st.tp += amount;
+  while(st.tp >= RANK_NEED[st.r] && st.r < RANKS.length-1){
+    st.tp -= RANK_NEED[st.r];
+    st.r++;
+    const rank = RANKS[st.r];
+    rankBanners.push({ text: `${STAT_DEFS[key].name}  ${RANKS[st.r-1]} → ${rank}`, col: rankColor(rank), t: 0, life: 2.2 });
+    juice.addHitstop(0.12); juice.addShake(0.3); juice.flash = Math.max(juice.flash, 0.3);
+    spawnParticles(player.x, player.y - P.h/2, { n: 34, col: [rankColor(rank), "#fff"], sp0: 100, sp1: 380, l0: .4, l1: .9, add: true, grav: -80 });
+  }
+}
+
+// ============================== 퀘스트 ==============================
+// 튜토리얼 체인 — 보상에 스탯 수련치 [소/중/대] 표기 (기획서 §6.1.3)
+const QUESTS = [
+  { name:"훈련 첫걸음", desc:"허수아비에 불티 10회 적중", type:"boltHit", need:10,
+    rewards:[["mag","중"]], exp:20 },
+  { name:"숲 정리",     desc:"숲 슬라임 5마리 처치", type:"kill", target:"slime", need:5,
+    rewards:[["agi","중"],["str","소"]], exp:45 },
+  { name:"차지 감각",   desc:"MAX 차지 화염구 3회 명중", type:"maxChargeHit", need:3,
+    rewards:[["mag","대"],["wil","중"]], exp:60 },
+  { name:"버섯 소탕",   desc:"주황버섯 3마리 처치", type:"kill", target:"mushroom", need:3,
+    rewards:[["vit","중"],["mag","중"],["str","소"]], exp:80 },
+];
+const questState = { idx: 0, prog: 0, doneAll: false, banner: null };
+function curQuest(){ return questState.doneAll ? null : QUESTS[questState.idx]; }
+function questEvent(type, target){
+  const q = curQuest();
+  if(!q || q.type !== type) return;
+  if(q.target && q.target !== target) return;
+  questState.prog++;
+  if(questState.prog >= q.need) completeQuest();
+}
+function completeQuest(){
+  const q = QUESTS[questState.idx];
+  const rewardText = q.rewards.map(([k,s])=>`${STAT_DEFS[k].name} 수련치 [${s}]`).join("   ");
+  questState.banner = { name: q.name, rewards: rewardText, exp: q.exp, t: 0, life: 3.4 };
+  for(const [k,s] of q.rewards) trainStat(k, TRAIN_SIZE[s], false);
+  gainExp(q.exp);
+  juice.flash = Math.max(juice.flash, 0.2);
+  questState.idx++;
+  questState.prog = 0;
+  if(questState.idx >= QUESTS.length) questState.doneAll = true;
 }
 
 function updatePlayer(dt){
@@ -199,14 +296,15 @@ function updatePlayer(dt){
   pl.dropTimer = Math.max(0, pl.dropTimer - dt);
   pl.iframes = Math.max(0, pl.iframes - dt);
   pl.hurtFlash = Math.max(0, pl.hurtFlash - dt);
-  pl.mp = Math.min(P.maxMp, pl.mp + P.mpRegen * dt);
+  pl.mp = Math.min(maxMp(), pl.mp + P.mpRegen * wilRegenMul() * dt);
 
   const charging = pl.fbCharge >= 0;
 
   // --- 대시
   if(inp.dashP() && pl.dashCd <= 0 && !charging){
     pl.dashTimer = P.dashTime;
-    pl.dashCd = P.dashCd;
+    pl.dashCd = P.dashCd * dashCdMul();
+    trainStat("agi", 0.5, true);
     pl.dashDir = (inp.left() && !inp.right()) ? -1 : (inp.right() ? 1 : pl.facing);
     pl.facing = pl.dashDir;
     pl.vy = 0;
@@ -222,7 +320,7 @@ function updatePlayer(dt){
     // --- 좌우 이동
     const mv = (inp.right()?1:0) - (inp.left()?1:0);
     const ctrl = pl.onGround ? 1 : P.airControl;
-    const speedCap = charging ? P.runSpeed * 0.4 : P.runSpeed;
+    const speedCap = (charging ? P.runSpeed * 0.4 : P.runSpeed) * agiSpeedMul();
     if(mv !== 0){
       pl.facing = mv;
       pl.vx += mv * P.accel * ctrl * dt;
@@ -240,6 +338,7 @@ function updatePlayer(dt){
         }else{
           pl.vy = P.jumpV;
           pl.onGround = false;
+          trainStat("agi", 0.2, true);
           spawnParticles(pl.x, pl.y, { n: 6, col: "#cbd5e1", sp0: 30, sp1: 90, l0: .2, l1: .4, ang: -Math.PI/2, spread: 1.2 });
         }
       }
@@ -282,7 +381,7 @@ function updatePlayer(dt){
     pl.fbCharge = 0;
   }
   if(charging){
-    pl.fbCharge = Math.min(SKILL.fireball.maxCharge, pl.fbCharge + dt);
+    pl.fbCharge = Math.min(SKILL.fireball.maxCharge, pl.fbCharge + dt * chargeSpeedMul());
     if((pl.fbCharge/SKILL.fireball.maxCharge) > 0.35 && Math.random() < 0.5){
       spawnParticles(pl.x + pl.facing*24, pl.y - P.h*0.55, { n: 1, col: ["#ff9d4d","#ffd27f"], sp0: 10, sp1: 60, l0: .15, l1: .3, add: true });
     }
@@ -301,7 +400,7 @@ function updatePlayer(dt){
 function respawnPlayer(){
   player.dead = false;
   player.x = 140; player.y = GROUND_Y; player.vx = 0; player.vy = 0;
-  player.hp = P.maxHp; player.mp = P.maxMp;
+  player.hp = maxHp(); player.mp = maxMp();
   player.iframes = 2.0;
   addFloatText(player.x, player.y - 80, "다시 도전!", "#8be9fd");
 }
@@ -309,6 +408,8 @@ function respawnPlayer(){
 function hurtPlayer(dmg, fromX){
   const pl = player;
   if(pl.iframes > 0 || pl.dashTimer > 0 || pl.dead) return;
+  dmg = Math.max(1, Math.round(dmg * vitDmgMul()));   // 체력 랭크 피해 감소
+  trainStat("vit", 1.2, true);                         // 행동 성장: 맞으며 단련
   pl.hp -= dmg;
   pl.iframes = P.hurtIframes;
   pl.hurtFlash = 0.3;
@@ -334,7 +435,8 @@ function gainExp(amount){
   while(player.exp >= expNeed(player.level)){
     player.exp -= expNeed(player.level);
     player.level++;
-    player.hp = P.maxHp; player.mp = P.maxMp;
+    trainStat("mag", 15, false);   // 레벨업: 학과(화염술사) 주 스탯 자동 보너스
+    player.hp = maxHp(); player.mp = maxMp();
     addFloatText(player.x, player.y - P.h - 50, "LEVEL UP!  Lv." + player.level, "#fbbf24");
     juice.addShake(0.35); juice.addHitstop(0.08); juice.flash = 0.25;
     spawnParticles(player.x, player.y - P.h/2, { n: 30, col: ["#fbbf24","#fde68a","#fff"], sp0: 80, sp1: 340, l0: .4, l1: .9, add: true, grav: -60 });
@@ -346,7 +448,7 @@ const projectiles = [];
 
 function fireBolt(){
   const pl = player;
-  const dmg = irand(SKILL.bolt.dmg[0], SKILL.bolt.dmg[1]);
+  const dmg = Math.floor(irand(SKILL.bolt.dmg[0], SKILL.bolt.dmg[1]) * magMul());
   projectiles.push({
     type: "bolt", x: pl.x + pl.facing*22, y: pl.y - P.h*0.55,
     vx: pl.facing * SKILL.bolt.speed, r: 6, dmg,
@@ -360,7 +462,7 @@ function fireBolt(){
 function fireFireball(t){    // t: 0~1 차지 비율
   const pl = player;
   const base = irand(SKILL.fireball.dmg[0], SKILL.fireball.dmg[1]);
-  const dmg = Math.floor(base * lerp(1, SKILL.fireball.dmgMaxMul, t));
+  const dmg = Math.floor(base * lerp(1, SKILL.fireball.dmgMaxMul, t) * magMul());
   projectiles.push({
     type: "fireball", x: pl.x + pl.facing*26, y: pl.y - P.h*0.55,
     vx: pl.facing * SKILL.fireball.speed, r: lerp(9, 18, t), dmg,
@@ -405,6 +507,7 @@ function explodeFireball(pr){
   spawnParticles(pr.x, pr.y, { n: 14 + Math.floor(pr.charge*18), col: ["#ff7b3a","#ffb35c","#ffe08a","#fff"], sp0: 100, sp1: 200 + pr.charge*260, l0: .2, l1: .5, add: true });
   spawnParticles(pr.x, pr.y, { n: 6, col: "#4b5563", sp0: 30, sp1: 90, l0: .3, l1: .7, grav: -40, r0: 4, r1: 8 });
   explosions.push({ x: pr.x, y: pr.y, r: pr.aoe, t: 0, life: 0.22 });
+  let hitAny = false;
   for(const m of monsters){
     if(m.dead) continue;
     const r = mobRect(m);
@@ -412,7 +515,12 @@ function explodeFireball(pr){
     const d = Math.hypot(cx - pr.x, cy - pr.y);
     if(d <= pr.aoe + Math.max(r.w, r.h)/2){
       hitMonster(m, pr.dmg, pr.kb * sign(cx - pr.x || pr.vx), pr);
+      hitAny = true;
     }
+  }
+  if(hitAny && pr.charge >= 0.999){
+    questEvent("maxChargeHit");      // 폭발당 1회
+    trainStat("wil", 1.0, true);     // 행동 성장: 집중 유지
   }
 }
 const explosions = [];
@@ -501,12 +609,15 @@ function updateMonsters(dt){
 
 function hitMonster(m, baseDmg, kb, pr){
   const d = MOB_DEFS[m.type];
-  const crit = Math.random() < CRIT_CHANCE;
+  const crit = Math.random() < critChance();
   const dmg = Math.floor(baseDmg * (crit ? CRIT_MUL : 1));
   m.hp -= dmg;
   m.hurtFlash = 0.12;
   m.hpBarTimer = 3.0;
-  m.kbVx = kb * (crit ? 1.4 : 1);
+  m.kbVx = kb * (crit ? 1.4 : 1) * strMul();
+  // 퀘스트·행동 성장 훅
+  if(pr.type === "bolt"){ questEvent("boltHit"); trainStat("mag", 0.5, true); }
+  if(pr.type === "fireball") trainStat("mag", 1.0, true);
   const r = mobRect(m);
   addDmgNumber(r.x + r.w/2, r.y - 6, dmg, crit);
   combo.hit();
@@ -518,13 +629,16 @@ function hitMonster(m, baseDmg, kb, pr){
     juice.addShake(0.2); juice.addHitstop(0.05);
     spawnParticles(m.x, m.y - d.h/2, { n: 18, col: [d.color, "#fff"], sp0: 80, sp1: 320, l0: .25, l1: .6, grav: 600 });
     gainExp(d.exp);
+    questEvent("kill", m.type);
+    trainStat("str", 1.5, true);   // 행동 성장: 전투 마무리
   }
 }
 
 // ============================== UPDATE ==============================
-let showHelp = true;
+let showHelp = true, showBook = false;
 function update(dt){
   if(inp.helpP()) showHelp = !showHelp;
+  if(inp.bookP()) showBook = !showBook;
   updatePlayer(dt);
   updateMonsters(dt);
   updateProjectiles(dt);
@@ -541,6 +655,14 @@ function update(dt){
   for(let i=floatTexts.length-1;i>=0;i--){
     const f = floatTexts[i]; f.t += dt;
     if(f.t >= f.life) floatTexts.splice(i,1);
+  }
+  for(let i=rankBanners.length-1;i>=0;i--){
+    rankBanners[i].t += dt;
+    if(rankBanners[i].t >= rankBanners[i].life) rankBanners.splice(i,1);
+  }
+  if(questState.banner){
+    questState.banner.t += dt;
+    if(questState.banner.t >= questState.banner.life) questState.banner = null;
   }
   juice.trauma = Math.max(0, juice.trauma - dt*1.6);
   juice.flash = Math.max(0, juice.flash - dt*2);
@@ -841,14 +963,17 @@ function renderHUD(){
   ctx.font = "bold 15px sans-serif";
   ctx.fillStyle = "#e2e8f0";
   ctx.fillText(`Lv.${pl.level}  견습 마법사`, 30, 38);
+  const ov = overallRank();
+  ctx.fillStyle = rankColor(ov);
+  ctx.fillText(`종합 ${ov}`, 232, 38);
 
-  bar(30, 48, 270, 14, pl.hp / P.maxHp, "#ef4444", "#7f1d1d");
+  bar(30, 48, 270, 14, pl.hp / maxHp(), "#ef4444", "#7f1d1d");
   ctx.font = "bold 11px sans-serif"; ctx.fillStyle = "#fff";
-  ctx.fillText(`HP ${Math.ceil(pl.hp)} / ${P.maxHp}`, 36, 59);
+  ctx.fillText(`HP ${Math.ceil(pl.hp)} / ${maxHp()}`, 36, 59);
 
-  bar(30, 68, 270, 14, pl.mp / P.maxMp, "#3b82f6", "#1e3a8a");
+  bar(30, 68, 270, 14, pl.mp / maxMp(), "#3b82f6", "#1e3a8a");
   ctx.fillStyle = "#fff";
-  ctx.fillText(`MP ${Math.floor(pl.mp)} / ${P.maxMp}`, 36, 79);
+  ctx.fillText(`MP ${Math.floor(pl.mp)} / ${maxMp()}`, 36, 79);
 
   const need = expNeed(pl.level);
   bar(30, 88, 270, 9, pl.exp / need, "#a3e635", "#3f6212");
@@ -860,6 +985,65 @@ function renderHUD(){
   drawSkillSlot(hotbarX,       hotbarY, "Z", "불티",   pl.boltCd / SKILL.bolt.cd, true);
   drawSkillSlot(hotbarX + 74,  hotbarY, "X", "화염구", pl.fbCd / SKILL.fireball.cdAfter, pl.mp >= SKILL.fireball.mp);
   drawSkillSlot(hotbarX + 148, hotbarY, "Shift", "대시", pl.dashCd / P.dashCd, true);
+
+  // --- 우측: 퀘스트 트래커
+  {
+    const q = curQuest();
+    ctx.textAlign = "left";
+    ctx.fillStyle = "rgba(10,12,24,.72)";
+    roundRect(VIEW_W - 316, 118, 300, 70, 10); ctx.fill();
+    ctx.font = "bold 13px sans-serif";
+    ctx.fillStyle = "#fbbf24";
+    ctx.fillText(q ? `퀘스트 — ${q.name}` : "퀘스트", VIEW_W - 302, 140);
+    ctx.font = "12px sans-serif"; ctx.fillStyle = "#cbd5e1";
+    if(q){
+      ctx.fillText(q.desc, VIEW_W - 302, 160);
+      bar(VIEW_W - 302, 168, 200, 8, questState.prog / q.need, "#fbbf24", "#3b3a2a");
+      ctx.fillStyle = "#fde68a"; ctx.font = "bold 12px sans-serif";
+      ctx.fillText(`${questState.prog} / ${q.need}`, VIEW_W - 94, 176);
+    }else{
+      ctx.fillText("모든 튜토리얼 퀘스트 완료!", VIEW_W - 302, 162);
+    }
+  }
+
+  // --- 중앙 배너: 퀘스트 완료
+  if(questState.banner){
+    const b = questState.banner, k = b.t / b.life;
+    const alpha = k < 0.1 ? k/0.1 : k > 0.85 ? (1-k)/0.15 : 1;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.textAlign = "center";
+    ctx.fillStyle = "rgba(10,12,24,.82)";
+    roundRect(VIEW_W/2 - 260, 150, 520, 92, 12); ctx.fill();
+    ctx.strokeStyle = "#fbbf24"; ctx.lineWidth = 2;
+    roundRect(VIEW_W/2 - 260, 150, 520, 92, 12); ctx.stroke();
+    ctx.font = "bold 22px sans-serif"; ctx.fillStyle = "#fbbf24";
+    ctx.fillText(`퀘스트 완료!  — ${b.name}`, VIEW_W/2, 182);
+    ctx.font = "bold 14px sans-serif"; ctx.fillStyle = "#a3e635";
+    ctx.fillText(`보상: ${b.rewards}   EXP +${b.exp}`, VIEW_W/2, 210);
+    ctx.font = "12px sans-serif"; ctx.fillStyle = "#94a3b8";
+    ctx.fillText("Tab: 학생 수첩에서 스탯 확인", VIEW_W/2, 230);
+    ctx.restore();
+  }
+
+  // --- 중앙 배너: 랭크 업
+  rankBanners.forEach((b, i)=>{
+    const k = b.t / b.life;
+    const alpha = k < 0.1 ? k/0.1 : k > 0.8 ? (1-k)/0.2 : 1;
+    const pop = k < 0.12 ? lerp(2.2, 1, k/0.12) : 1;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.textAlign = "center";
+    ctx.font = `bold ${Math.floor(15*pop)}px sans-serif`;
+    ctx.fillStyle = "#e2e8f0";
+    ctx.fillText("— RANK UP —", VIEW_W/2, 300 + i*74);
+    ctx.font = `bold ${Math.floor(34*pop)}px sans-serif`;
+    ctx.lineWidth = 6; ctx.strokeStyle = "rgba(0,0,0,.75)";
+    ctx.strokeText(b.text, VIEW_W/2, 336 + i*74);
+    ctx.fillStyle = b.col;
+    ctx.fillText(b.text, VIEW_W/2, 336 + i*74);
+    ctx.restore();
+  });
 
   // --- 콤보
   if(combo.count >= 2){
@@ -884,14 +1068,17 @@ function renderHUD(){
       "← →  이동   /  Space·↑  점프",
       "↓+Space  발판 아래로 내려가기",
       "Shift  대시 (무적 프레임)",
-      "Z  불티 — 빠른 기본 마법",
-      "X 홀드→놓기  화염구 — 차지할수록 강력 (MP 15)",
+      "Z  불티  /  X 홀드→놓기  화염구 (MP 15)",
+      "Tab  학생 수첩 — 스탯 랭크·퀘스트",
     ];
     lines.forEach((l, i)=> ctx.fillText(l, 30, VIEW_H - 120 + i*21));
   }else{
     ctx.font = "12px sans-serif"; ctx.fillStyle = "rgba(203,213,225,.5)";
     ctx.fillText("H: 조작법", 20, VIEW_H - 16);
   }
+
+  // --- 학생 수첩 (Tab)
+  if(showBook) renderBook();
 
   // --- 사망 오버레이
   if(pl.dead){
@@ -907,7 +1094,96 @@ function renderHUD(){
   // 버전 표기
   ctx.textAlign = "right";
   ctx.font = "11px sans-serif"; ctx.fillStyle = "rgba(148,163,184,.55)";
-  ctx.fillText("아르카나 아카데미 프로토타입 v0.1 — 입문의 숲", VIEW_W - 14, 22);
+  ctx.fillText("아르카나 아카데미 프로토타입 v0.2 — 입문의 숲", VIEW_W - 14, 22);
+  ctx.restore();
+}
+
+function renderBook(){
+  const PW = 820, PH = 460;
+  const px = (VIEW_W - PW)/2, py = (VIEW_H - PH)/2;
+  ctx.save();
+  ctx.fillStyle = "rgba(0,0,0,.55)";
+  ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+  ctx.fillStyle = "rgba(14,17,32,.96)";
+  roundRect(px, py, PW, PH, 14); ctx.fill();
+  ctx.strokeStyle = "#475569"; ctx.lineWidth = 2;
+  roundRect(px, py, PW, PH, 14); ctx.stroke();
+
+  ctx.textAlign = "left";
+  ctx.font = "bold 20px sans-serif"; ctx.fillStyle = "#8be9fd";
+  ctx.fillText("학생 수첩", px + 28, py + 40);
+  ctx.font = "13px sans-serif"; ctx.fillStyle = "#64748b";
+  ctx.fillText("아르카나 아카데미 1학년 — 화염술 예과 (Tab: 닫기)", px + 130, py + 40);
+  const ov = overallRank();
+  ctx.textAlign = "right";
+  ctx.font = "bold 17px sans-serif"; ctx.fillStyle = rankColor(ov);
+  ctx.fillText(`종합 랭크  ${ov}`, px + PW - 28, py + 40);
+
+  // ----- 좌: 스탯 랭크
+  ctx.textAlign = "left";
+  ctx.font = "bold 15px sans-serif"; ctx.fillStyle = "#e2e8f0";
+  ctx.fillText("능력 평가", px + 28, py + 78);
+  const keys = Object.keys(STAT_DEFS);
+  keys.forEach((k, i)=>{
+    const st = player.stats[k], def = STAT_DEFS[k];
+    const rank = RANKS[st.r];
+    const ry = py + 100 + i*66;
+    // 이름·설명
+    ctx.font = "bold 15px sans-serif"; ctx.fillStyle = "#e2e8f0";
+    ctx.fillText(def.name, px + 28, ry + 16);
+    ctx.font = "11px sans-serif"; ctx.fillStyle = "#64748b";
+    ctx.fillText(def.desc, px + 28, ry + 33);
+    // 랭크 배지
+    ctx.fillStyle = "rgba(0,0,0,.4)";
+    roundRect(px + 190, ry - 2, 58, 30, 7); ctx.fill();
+    ctx.strokeStyle = rankColor(rank); ctx.lineWidth = 2;
+    roundRect(px + 190, ry - 2, 58, 30, 7); ctx.stroke();
+    ctx.textAlign = "center";
+    ctx.font = "bold 17px sans-serif"; ctx.fillStyle = rankColor(rank);
+    ctx.fillText(rank, px + 219, ry + 19);
+    ctx.textAlign = "left";
+    // 수련치 눈금 (숫자 비노출 — ◆ 10칸)
+    const need = RANK_NEED[st.r];
+    const fill = need === Infinity ? 10 : Math.floor(clamp(st.tp / need, 0, 1) * 10);
+    for(let c=0;c<10;c++){
+      ctx.fillStyle = c < fill ? rankColor(rank) : "rgba(100,116,139,.35)";
+      const cx = px + 264 + c*13;
+      ctx.beginPath();
+      ctx.moveTo(cx, ry + 8); ctx.lineTo(cx + 5, ry + 14);
+      ctx.lineTo(cx, ry + 20); ctx.lineTo(cx - 5, ry + 14);
+      ctx.closePath(); ctx.fill();
+    }
+    ctx.font = "10px sans-serif"; ctx.fillStyle = "#64748b";
+    ctx.fillText(need === Infinity ? "최고 랭크" : "다음 랭크까지의 수련", px + 264, ry + 33);
+  });
+  ctx.font = "11px sans-serif"; ctx.fillStyle = "#475569";
+  ctx.fillText("* 문자 티어 돌파(승급 시험)는 추후 업데이트 — 현재는 자동 승급", px + 28, py + PH - 20);
+
+  // ----- 우: 퀘스트 일지
+  const qx = px + 440;
+  ctx.font = "bold 15px sans-serif"; ctx.fillStyle = "#e2e8f0";
+  ctx.fillText("퀘스트 일지", qx, py + 78);
+  QUESTS.forEach((q, i)=>{
+    const ry = py + 100 + i*74;
+    const state = i < questState.idx ? "done" : i === questState.idx && !questState.doneAll ? "active" : "locked";
+    ctx.fillStyle = state === "active" ? "rgba(251,191,36,.08)" : "rgba(0,0,0,.25)";
+    roundRect(qx, ry - 14, 352, 62, 8); ctx.fill();
+    if(state === "active"){
+      ctx.strokeStyle = "#fbbf24"; ctx.lineWidth = 1.5;
+      roundRect(qx, ry - 14, 352, 62, 8); ctx.stroke();
+    }
+    ctx.font = "bold 14px sans-serif";
+    ctx.fillStyle = state === "done" ? "#4ade80" : state === "active" ? "#fbbf24" : "#475569";
+    const mark = state === "done" ? "✓ " : state === "active" ? "▶ " : "잠김 · ";
+    ctx.fillText(mark + q.name, qx + 12, ry + 6);
+    ctx.font = "12px sans-serif";
+    ctx.fillStyle = state === "locked" ? "#3f4b63" : "#94a3b8";
+    ctx.fillText(q.desc + (state === "active" ? `   (${questState.prog}/${q.need})` : ""), qx + 12, ry + 24);
+    ctx.font = "11px sans-serif";
+    ctx.fillStyle = state === "locked" ? "#334155" : "#84cc16";
+    const rw = q.rewards.map(([k,s])=>`${STAT_DEFS[k].name}[${s}]`).join(" ") + `  EXP ${q.exp}`;
+    ctx.fillText("보상: " + rw, qx + 12, ry + 40);
+  });
   ctx.restore();
 }
 
