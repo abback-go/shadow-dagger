@@ -24,7 +24,8 @@
 
 // ============================== CONFIG ==============================
 const VIEW_W = 1280, VIEW_H = 720;
-const MAP_W = 3600, GROUND_Y = 640;
+const MAP_W = 4400, GROUND_Y = 640;
+const GATE_X = 3620, ARENA_L = 3660, ARENA_R = 4360;   // 학기말 실기 시험장
 const DT = 1 / 120;                       // 고정 타임스텝
 const GRAV = 2600;
 
@@ -62,6 +63,7 @@ const MOB_DEFS = {
   dummy:    { name:"허수아비",   hp: 999999, w: 34, h: 56, speed: 0,   dmg: 0,  exp: 0,  color:"#9a7b4f", contact:false },
   slime:    { name:"숲 슬라임",  hp: 34,     w: 36, h: 26, speed: 46,  dmg: 10, exp: 8,  color:"#5fd068", contact:true  },
   mushroom: { name:"주황버섯",   hp: 62,     w: 34, h: 40, speed: 74,  dmg: 15, exp: 15, color:"#e8843c", contact:true  },
+  boss:     { name:"숲의 수호자 그루트닉", hp: 620, w: 92, h: 116, speed: 0, dmg: 20, exp: 220, color:"#5e7a4a", contact:true },
 };
 const RESPAWN_TIME = 5.0;
 
@@ -173,13 +175,14 @@ const signs = [
   { x: 1000, text: "발판 위에서 ↓+Space: 아래로 내려가기" },
   { x: 1420, text: "Shift: 대시 (짧은 무적!)" },
   { x: 1700, text: "X 누르고 있기: 화염구 차지 → 놓으면 발사!" },
-  { x: 3380, text: "튜토리얼 완료! — 다음 업데이트에서 계속" },
+  { x: 3460, text: "전방: 학기말 실기 시험장!" },
+  { x: 4340, text: "1학기 수료! — 다음 업데이트에서 계속" },
 ];
 
 // 배경 나무(플레이스홀더) — 결정적 배치
 const bgTrees = [];
-for(let i=0;i<28;i++){
-  const t = i / 28;
+for(let i=0;i<34;i++){
+  const t = i / 34;
   bgTrees.push({ x: 60 + i*130 + (i*97 % 50), h: 180 + (i*53 % 120), layer: i%2 });
 }
 
@@ -260,6 +263,8 @@ const QUESTS = [
     rewards:[["mag","대"],["wil","중"]], exp:60 },
   { name:"버섯 소탕",   desc:"주황버섯 3마리 처치", type:"kill", target:"mushroom", need:3,
     rewards:[["vit","중"],["mag","중"],["str","소"]], exp:80 },
+  { name:"학기말 실기 시험", desc:"숲 끝 시험장의 수호자를 쓰러뜨려라", type:"kill", target:"boss", need:1,
+    rewards:[["mag","특대"],["vit","대"],["str","중"]], exp:200 },
 ];
 const questState = { idx: 0, prog: 0, doneAll: false, banner: null };
 function curQuest(){ return questState.doneAll ? null : QUESTS[questState.idx]; }
@@ -381,6 +386,7 @@ function saveGame(){
       v: 1, level: player.level, exp: player.exp, stats: player.stats,
       quest: { idx: questState.idx, prog: questState.prog, doneAll: questState.doneAll },
       lesson: { status: lessonState.status, prog: lessonState.prog },
+      bossDefeated: boss.defeated,
       x: Math.round(player.x), best: combo.best,
     }));
     saveFlash = 1.4;
@@ -394,6 +400,7 @@ function loadGame(){
     for(const k in player.stats) if(d.stats && d.stats[k]) player.stats[k] = d.stats[k];
     if(d.quest) Object.assign(questState, d.quest);
     if(d.lesson) Object.assign(lessonState, d.lesson);
+    if(d.bossDefeated){ boss.defeated = true; BOSS_M.dead = true; BOSS_M.respawn = Infinity; }
     player.x = clamp(d.x || 140, P.w/2, MAP_W - P.w/2);
     combo.best = d.best || 0;
     player.hp = maxHp(); player.mp = maxMp();
@@ -477,6 +484,14 @@ function updatePlayer(dt){
 
   // --- 이동 & 충돌
   pl.x = clamp(pl.x + pl.vx*dt, P.w/2, MAP_W - P.w/2);
+  if(boss.active && !BOSS_M.dead){
+    pl.x = clamp(pl.x, ARENA_L + 20, ARENA_R - 20);          // 시험 중 가시벽
+  }else if(!boss.defeated && !bossReady()){
+    if(pl.x > GATE_X - 24){                                   // 시험 자격 전 가시문
+      pl.x = GATE_X - 24;
+      if(Math.random() < 0.02) addFloatText(GATE_X - 60, GROUND_Y - 120, "남은 퀘스트를 완료하면 시험장이 열린다", "#f0abfc");
+    }
+  }
   const prevFeet = pl.y;
   pl.y += pl.vy*dt;
   pl.onGround = false;
@@ -682,6 +697,128 @@ spawnMob("slime", 2320, 2240, 2440);
 spawnMob("mushroom", 2560, 2480, 2700);
 spawnMob("mushroom", 2820, 2740, 2960);
 spawnMob("mushroom", 3080, 3000, 3220);
+spawnMob("boss", 4100, 4100, 4100);
+const BOSS_M = monsters[monsters.length - 1];
+
+// ============================== 보스: 학기말 실기 시험 ==============================
+// windup(예고) → 실행 → 회복 루프, HP 50% 이하 2페이즈 (기획서 §8.6)
+const boss = { active: false, defeated: false, state: "wait", t: 1.2, chargeDir: 1 };
+const spikes = [];   // 뿌리 가시 경고→분출
+const eprojs = [];   // 씨앗 투사체 (적 탄환)
+function bossReady(){ return questState.idx >= 4 || questState.doneAll; }
+function bossPhase2(){ return BOSS_M.hp <= BOSS_M.maxHp * 0.5; }
+
+function resetBoss(){
+  boss.active = false; boss.state = "wait"; boss.t = 1.2;
+  BOSS_M.hp = BOSS_M.maxHp; BOSS_M.x = BOSS_M.spawnX; BOSS_M.kbVx = 0;
+  spikes.length = 0; eprojs.length = 0;
+}
+
+function updateBoss(dt){
+  const m = BOSS_M;
+  if(boss.defeated || m.dead) return;
+  const pl = player;
+  // 입장 감지
+  if(!boss.active){
+    if(bossReady() && !pl.dead && pl.x > ARENA_L + 40){
+      boss.active = true; boss.state = "wait"; boss.t = 1.6;
+      questBanner("학기말 실기 시험 개시!", `${MOB_DEFS.boss.name}을(를) 쓰러뜨려라`, "몸이 하얗게 빛나면 공격 예고 — 대시(Shift)로 회피!");
+      juice.addShake(0.4);
+    }
+    return;
+  }
+  if(pl.dead){ resetBoss(); return; }
+
+  const p2 = bossPhase2();
+  m.dir = sign(pl.x - m.x);
+  boss.t -= dt;
+  switch(boss.state){
+    case "wait":
+      if(boss.t <= 0){
+        const r = Math.random();
+        boss.state = r < 0.4 ? "windup_charge" : r < 0.75 ? "windup_spike" : "windup_seed";
+        boss.t = p2 ? 0.5 : 0.7;   // 예고 시간 (공정한 회피 창)
+      }
+      break;
+    case "windup_charge": case "windup_spike": case "windup_seed":
+      if(boss.t <= 0){
+        if(boss.state === "windup_charge"){
+          boss.state = "charge"; boss.t = 1.0; boss.chargeDir = m.dir;
+          juice.addShake(0.15);
+        }else if(boss.state === "windup_spike"){
+          boss.state = "recover"; boss.t = 0.9;
+          spawnSpikes(p2 ? 3 : 2);
+          juice.addShake(0.35);
+        }else{
+          boss.state = "recover"; boss.t = 0.8;
+          throwSeeds(p2 ? 4 : 3);
+        }
+      }
+      break;
+    case "charge":
+      m.x += boss.chargeDir * (p2 ? 620 : 500) * dt;
+      if(Math.random() < 0.6)
+        spawnParticles(m.x - boss.chargeDir*44, m.y - 16, { n: 1, col: ["#5e7a4a","#8a683d"], sp0: 30, sp1: 110, l0: .2, l1: .4, grav: 300 });
+      if(m.x < ARENA_L + 70 || m.x > ARENA_R - 70 || boss.t <= 0){
+        boss.state = "recover"; boss.t = p2 ? 0.5 : 0.8;
+        juice.addShake(0.25);
+      }
+      break;
+    case "recover":
+      if(boss.t <= 0){ boss.state = "wait"; boss.t = p2 ? rand(0.6, 1.0) : rand(1.0, 1.5); }
+      break;
+  }
+  m.x = clamp(m.x, ARENA_L + 60, ARENA_R - 60);
+}
+
+function spawnSpikes(n){
+  const xs = [player.x];
+  for(let i = 1; i < n; i++) xs.push(player.x + (i % 2 ? -1 : 1) * Math.ceil(i/2) * 140);
+  for(const sx of xs) spikes.push({ x: clamp(sx, ARENA_L + 40, ARENA_R - 40), warn: 0.75, active: 0 });
+}
+function updateSpikes(dt){
+  for(let i = spikes.length - 1; i >= 0; i--){
+    const s = spikes[i];
+    if(s.warn > 0){
+      s.warn -= dt;
+      if(s.warn <= 0){
+        s.active = 0.45;
+        juice.addShake(0.22);
+        spawnParticles(s.x, GROUND_Y, { n: 10, col: ["#7a9b5e","#4a6741","#8a683d"], sp0: 60, sp1: 240, l0: .2, l1: .5, grav: 500 });
+      }
+    }else{
+      s.active -= dt;
+      if(s.active > 0.12 && !player.dead && Math.abs(player.x - s.x) < 46 && player.y > GROUND_Y - 72){
+        hurtPlayer(15, s.x + (player.x < s.x ? 40 : -40));
+      }
+      if(s.active <= 0) spikes.splice(i, 1);
+    }
+  }
+}
+function throwSeeds(n){
+  const m = BOSS_M;
+  for(let i = 0; i < n; i++){
+    const tx = player.x + rand(-70, 70);
+    const t0 = rand(0.75, 1.05);
+    const sx = m.x, sy = m.y - 92;
+    eprojs.push({ x: sx, y: sy, vx: (tx - sx)/t0, vy: (GROUND_Y - sy - 0.5*GRAV*t0*t0)/t0, r: 9 });
+  }
+}
+function updateEprojs(dt){
+  for(let i = eprojs.length - 1; i >= 0; i--){
+    const e = eprojs[i];
+    e.vy += GRAV * dt; e.x += e.vx * dt; e.y += e.vy * dt;
+    const pr = playerRect();
+    if(!player.dead && e.x > pr.x - e.r && e.x < pr.x + pr.w + e.r && e.y > pr.y - e.r && e.y < pr.y + pr.h + e.r){
+      hurtPlayer(12, e.x - sign(e.vx) * 30);
+      eprojs.splice(i, 1); continue;
+    }
+    if(e.y >= GROUND_Y){
+      spawnParticles(e.x, GROUND_Y, { n: 6, col: ["#7a9b5e","#a3e635"], sp0: 40, sp1: 160, l0: .2, l1: .4, grav: 400 });
+      eprojs.splice(i, 1);
+    }
+  }
+}
 
 function mobRect(m){
   const d = MOB_DEFS[m.type];
@@ -694,7 +831,7 @@ function updateMonsters(dt){
     m.animT += dt;
     if(m.dead){
       m.respawn -= dt;
-      if(m.respawn <= 0 && m.type !== "dummy"){
+      if(m.respawn <= 0 && m.type !== "dummy" && m.type !== "boss"){
         m.dead = false; m.hp = m.maxHp; m.x = m.spawnX; m.y = GROUND_Y;
         m.kbVx = 0; m.hpBarTimer = 0;
         spawnParticles(m.x, m.y - d.h/2, { n: 8, col: "#a78bfa", sp0: 40, sp1: 140, l0: .2, l1: .5, add: true });
@@ -747,7 +884,7 @@ function hitMonster(m, baseDmg, kb, pr){
   m.hp -= dmg;
   m.hurtFlash = 0.12;
   m.hpBarTimer = 3.0;
-  m.kbVx = kb * (crit ? 1.4 : 1) * strMul();
+  m.kbVx = kb * (crit ? 1.4 : 1) * strMul() * (m.type === "boss" ? 0.07 : 1);   // 보스는 넉백 저항
   // 퀘스트·행동 성장 훅
   if(pr.type === "bolt"){ questEvent("boltHit"); trainStat("mag", 0.5, true); }
   if(pr.type === "fireball") trainStat("mag", 1.0, true);
@@ -768,6 +905,14 @@ function hitMonster(m, baseDmg, kb, pr){
     gainExp(d.exp);
     questEvent("kill", m.type);
     trainStat("str", 1.5, true);   // 행동 성장: 전투 마무리
+    if(m.type === "boss"){
+      boss.defeated = true; boss.active = false;
+      spikes.length = 0; eprojs.length = 0;
+      juice.addHitstop(0.3); juice.addShake(1.0); juice.flash = 0.5;
+      spawnParticles(m.x, m.y - 60, { n: 60, col: ["#7a9b5e","#a3e635","#fff","#fbbf24"], sp0: 100, sp1: 520, l0: .4, l1: 1.0, grav: 300 });
+      questBanner("실기 시험 합격!", "숲의 수호자를 쓰러뜨렸다 — 1학기 수료!", "다음 업데이트에서 2학기로 계속");
+      saveGame();
+    }
   }
 }
 
@@ -801,6 +946,9 @@ function update(dt){
 
   updatePlayer(dt);
   updateMonsters(dt);
+  updateBoss(dt);
+  updateSpikes(dt);
+  updateEprojs(dt);
   updateProjectiles(dt);
   updateFields(dt);
   updateParticles(dt);
@@ -921,6 +1069,53 @@ function render(){
     ctx.restore();
   }
 
+  // --- 시험장 가시문 / 아레나 벽
+  if(!boss.defeated && !bossReady()){
+    drawThornWall(GATE_X);
+    ctx.textAlign = "center";
+    ctx.font = "bold 13px sans-serif"; ctx.fillStyle = "#f0abfc";
+    ctx.fillText("시험 자격 필요 — 퀘스트를 모두 완료하자", GATE_X, GROUND_Y - 190);
+  }
+  if(boss.active && !BOSS_M.dead){
+    drawThornWall(ARENA_L);
+    drawThornWall(ARENA_R);
+  }
+
+  // --- 뿌리 가시 (경고 → 분출)
+  for(const s of spikes){
+    if(s.warn > 0){
+      const pulse = 0.35 + Math.abs(Math.sin(performance.now()/90)) * 0.35;
+      ctx.fillStyle = `rgba(239,68,68,${pulse})`;
+      ctx.fillRect(s.x - 46, GROUND_Y - 6, 92, 6);
+      ctx.textAlign = "center";
+      ctx.font = "bold 18px sans-serif"; ctx.fillStyle = "#ef4444";
+      ctx.fillText("!", s.x, GROUND_Y - 14);
+    }else if(s.active > 0){
+      const hgt = 72 * Math.min(1, s.active / 0.32);
+      ctx.fillStyle = "#5e7a4a";
+      for(let ti = -1; ti <= 1; ti++){
+        ctx.beginPath();
+        ctx.moveTo(s.x + ti*26 - 12, GROUND_Y);
+        ctx.lineTo(s.x + ti*26, GROUND_Y - hgt * (ti === 0 ? 1 : 0.7));
+        ctx.lineTo(s.x + ti*26 + 12, GROUND_Y);
+        ctx.closePath(); ctx.fill();
+      }
+    }
+  }
+
+  // --- 씨앗 투사체
+  for(const e of eprojs){
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    const eg = ctx.createRadialGradient(e.x, e.y, 0, e.x, e.y, e.r*2);
+    eg.addColorStop(0, "#d9f99d");
+    eg.addColorStop(0.5, "#84cc16");
+    eg.addColorStop(1, "rgba(90,140,40,0)");
+    ctx.fillStyle = eg;
+    ctx.beginPath(); ctx.arc(e.x, e.y, e.r*2, 0, Math.PI*2); ctx.fill();
+    ctx.restore();
+  }
+
   // --- 교수 NPC
   drawProfessor();
 
@@ -931,7 +1126,39 @@ function render(){
     const r = mobRect(m);
     const squish = m.type === "slime" ? Math.sin(m.animT * 6) * 3 : 0;
     ctx.fillStyle = m.hurtFlash > 0 ? "#ffffff" : d.color;
-    if(m.type === "dummy"){
+    if(m.type === "boss"){
+      // 예고(windup) 점멸 — 공정한 회피 신호
+      const tele = boss.active && boss.state.startsWith("windup") && Math.floor(performance.now()/90) % 2 === 0;
+      const p2 = bossPhase2();
+      const flash = m.hurtFlash > 0 || tele;
+      const sway = Math.sin(m.animT * 1.6) * 3;
+      // 몸통(고목 줄기)
+      ctx.fillStyle = flash ? "#fff" : "#4a3b28";
+      ctx.fillRect(m.x - 30, m.y - d.h + 26, 60, d.h - 26);
+      // 팔
+      ctx.fillStyle = flash ? "#fff" : "#3d3122";
+      ctx.fillRect(m.x - 30 - 18, m.y - d.h + 44 + sway, 20, 54);
+      ctx.fillRect(m.x + 30 - 2,  m.y - d.h + 44 - sway, 20, 54);
+      // 수관(잎 머리)
+      ctx.fillStyle = flash ? "#fff" : (p2 ? "#6b8747" : d.color);
+      ctx.beginPath();
+      ctx.ellipse(m.x, m.y - d.h + 18, 52, 30, 0, 0, Math.PI*2);
+      ctx.fill();
+      // 눈 (2페이즈: 붉게 발광)
+      ctx.save();
+      if(p2) ctx.globalCompositeOperation = "lighter";
+      ctx.fillStyle = p2 ? "#ff5040" : "#ffd93d";
+      ctx.fillRect(m.x - 14 + m.dir*4, m.y - d.h + 40, 8, 9);
+      ctx.fillRect(m.x + 6 + m.dir*4,  m.y - d.h + 40, 8, 9);
+      ctx.restore();
+      // 균열(체력 낮을수록)
+      if(m.hp < m.maxHp * 0.75){
+        ctx.strokeStyle = "rgba(255,220,120,.5)"; ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(m.x - 10, m.y - 60); ctx.lineTo(m.x + 2, m.y - 40); ctx.lineTo(m.x - 6, m.y - 20);
+        ctx.stroke();
+      }
+    }else if(m.type === "dummy"){
       // 허수아비: 기둥 + 머리
       ctx.fillStyle = "#7a5a33";
       ctx.fillRect(m.x - 5, m.y - d.h, 10, d.h);
@@ -959,8 +1186,8 @@ function render(){
       ctx.fillRect(m.x - 8 + m.dir*3, r.y + 20, 4, 6);
       ctx.fillRect(m.x + 4 + m.dir*3, r.y + 20, 4, 6);
     }
-    // HP바
-    if(m.hpBarTimer > 0 && m.type !== "dummy"){
+    // HP바 (보스는 상단 대형 바 사용)
+    if(m.hpBarTimer > 0 && m.type !== "dummy" && m.type !== "boss"){
       const bw = 44;
       ctx.fillStyle = "rgba(0,0,0,.6)";
       ctx.fillRect(m.x - bw/2, r.y - 14, bw, 6);
@@ -1051,6 +1278,21 @@ function render(){
   }
 
   renderHUD();
+}
+
+function drawThornWall(x){
+  ctx.fillStyle = "#3d4d2e";
+  ctx.fillRect(x - 7, GROUND_Y - 170, 14, 170);
+  ctx.fillStyle = "#5e7a4a";
+  for(let i = 0; i < 6; i++){
+    const wy = GROUND_Y - 20 - i*28;
+    const dirn = i % 2 ? 1 : -1;
+    ctx.beginPath();
+    ctx.moveTo(x, wy);
+    ctx.lineTo(x + dirn*26, wy - 10);
+    ctx.lineTo(x, wy - 18);
+    ctx.closePath(); ctx.fill();
+  }
 }
 
 function drawProfessor(){
@@ -1208,6 +1450,25 @@ function renderHUD(){
   drawSkillSlot(hotbarX + 148, hotbarY, "C", "화염장판", pl.fieldCd / SKILL.field.cd, pl.mp >= SKILL.field.mp, lessonState.status === "avail");
   drawSkillSlot(hotbarX + 222, hotbarY, "Shift", "대시", pl.dashCd / P.dashCd, true);
 
+  // --- 보스 HP 바 (시험 중)
+  if(boss.active && !BOSS_M.dead){
+    const bw = 540, bx = VIEW_W/2 - bw/2, by = 34;
+    const p2 = bossPhase2();
+    ctx.textAlign = "center";
+    ctx.font = "bold 15px sans-serif";
+    ctx.lineWidth = 4; ctx.strokeStyle = "rgba(0,0,0,.7)";
+    ctx.strokeText(MOB_DEFS.boss.name + (p2 ? "  — 격노" : ""), VIEW_W/2, by - 8);
+    ctx.fillStyle = p2 ? "#f87171" : "#d9f99d";
+    ctx.fillText(MOB_DEFS.boss.name + (p2 ? "  — 격노" : ""), VIEW_W/2, by - 8);
+    ctx.fillStyle = "rgba(0,0,0,.65)";
+    ctx.fillRect(bx - 3, by - 3, bw + 6, 20);
+    ctx.fillStyle = p2 ? "#ef4444" : "#84cc16";
+    ctx.fillRect(bx, by, bw * clamp(BOSS_M.hp / BOSS_M.maxHp, 0, 1), 14);
+    // 페이즈 분절선 (50%)
+    ctx.fillStyle = "rgba(255,255,255,.7)";
+    ctx.fillRect(bx + bw/2 - 1, by - 3, 2, 20);
+  }
+
   // --- 우측: 퀘스트 트래커
   {
     const q = curQuest();
@@ -1349,7 +1610,7 @@ function renderHUD(){
   // 버전 표기
   ctx.textAlign = "right";
   ctx.font = "11px sans-serif"; ctx.fillStyle = "rgba(148,163,184,.55)";
-  ctx.fillText("아르카나 아카데미 프로토타입 v0.3 — 입문의 숲", VIEW_W - 14, 22);
+  ctx.fillText("아르카나 아카데미 프로토타입 v0.4 — 입문의 숲", VIEW_W - 14, 22);
   // 저장 표시
   if(saveFlash > 0){
     ctx.globalAlpha = Math.min(1, saveFlash);
