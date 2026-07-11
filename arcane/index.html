@@ -601,13 +601,13 @@ function fireBolt(){
   const dmg = Math.floor(irand(SKILL.bolt.dmg[0], SKILL.bolt.dmg[1]) * magMul());
   pl.castT = 0.16;
   projectiles.push({
-    type: "bolt", x: pl.x + pl.facing*26, y: pl.y - 56,
+    type: "bolt", x: pl.x + pl.facing*26, y: pl.y - 26,   // 소형 몹(슬라임 h26)도 맞는 높이
     vx: pl.facing * SKILL.bolt.speed, r: 6, dmg,
     dist: 0, maxDist: SKILL.bolt.range, kb: 90,
     hitstop: 0.025, shake: 0.06,
   });
   pl.vx -= pl.facing * 20;   // 소소한 반동
-  spawnParticles(pl.x + pl.facing*26, pl.y - 56, { n: 4, col: ["#ffb35c","#ffe08a"], ang: pl.facing>0?0:Math.PI, spread: .5, sp0: 60, sp1: 160, l0: .1, l1: .25, add: true });
+  spawnParticles(pl.x + pl.facing*26, pl.y - 26, { n: 4, col: ["#ffb35c","#ffe08a"], ang: pl.facing>0?0:Math.PI, spread: .5, sp0: 60, sp1: 160, l0: .1, l1: .25, add: true });
 }
 
 function fireFireball(t){    // t: 0~1 차지 비율
@@ -616,7 +616,7 @@ function fireFireball(t){    // t: 0~1 차지 비율
   const dmg = Math.floor(base * lerp(1, SKILL.fireball.dmgMaxMul, t) * magMul());
   pl.castT = 0.22;
   projectiles.push({
-    type: "fireball", x: pl.x + pl.facing*30, y: pl.y - 56,
+    type: "fireball", x: pl.x + pl.facing*30, y: pl.y - 30,   // 소형 몹 직격 가능 높이
     vx: pl.facing * SKILL.fireball.speed, r: lerp(9, 18, t), dmg,
     dist: 0, maxDist: 640, kb: lerp(140, 320, t),
     aoe: lerp(46, 110, t), charge: t,
@@ -624,7 +624,7 @@ function fireFireball(t){    // t: 0~1 차지 비율
   });
   pl.vx -= pl.facing * lerp(40, 160, t);   // 반동
   juice.addShake(0.08 + t*0.1);
-  spawnParticles(pl.x + pl.facing*30, pl.y - 56, { n: 8 + Math.floor(t*8), col: ["#ff7b3a","#ffd27f"], ang: pl.facing>0?0:Math.PI, spread: .6, sp0: 80, sp1: 260, l0: .15, l1: .3, add: true });
+  spawnParticles(pl.x + pl.facing*30, pl.y - 30, { n: 8 + Math.floor(t*8), col: ["#ff7b3a","#ffd27f"], ang: pl.facing>0?0:Math.PI, spread: .6, sp0: 80, sp1: 260, l0: .15, l1: .3, add: true });
 }
 
 function updateProjectiles(dt){
