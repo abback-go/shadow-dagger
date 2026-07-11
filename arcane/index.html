@@ -67,6 +67,7 @@ const MOB_DEFS = {
   slime:    { name:"숲 슬라임",  hp: 34,     w: 36, h: 26, speed: 46,  dmg: 10, exp: 8,  color:"#5fd068", contact:true  },
   mushroom: { name:"주황버섯",   hp: 62,     w: 34, h: 40, speed: 74,  dmg: 15, exp: 15, color:"#e8843c", contact:true  },
   boss:     { name:"숲의 수호자 그루트닉", hp: 620, w: 92, h: 116, speed: 0, dmg: 20, exp: 220, color:"#5e7a4a", contact:true },
+  bat:      { name:"그림자 박쥐", hp: 26, w: 24, h: 20, speed: 72, dmg: 9, exp: 10, color:"#2a2438", contact:true, float:true },
 };
 const RESPAWN_TIME = 5.0;
 
@@ -167,10 +168,14 @@ const MAPS = {
     signs: [
       { x: 250,  text: "← → 이동  /  Space 점프  /  Shift 대시" },
       { x: 520,  text: "강의동: 교수님께 E — 마법은 배워야 쓸 수 있다!" },
+      { x: 1600, text: "지하 계단: ↑ 로 내려간다… 왠지 으스스하다" },
       { x: 1950, text: "훈련장 — 배운 마법을 허수아비에 시험!" },
       { x: 2700, text: "관문: ↑ 를 눌러 입문의 숲으로" },
     ],
-    portals: [ { x: 2820, to: "forest", tx: 180, label: "입문의 숲" } ],
+    portals: [
+      { x: 2820, to: "forest", tx: 180, ty: 640, label: "입문의 숲" },
+      { x: 1750, to: "basement", tx: 150, ty: 210, label: "지하실 (수상한 계단)", tint: "#4ade80", down: true },
+    ],
     mobs: [ ["dummy", 2000], ["dummy", 2090], ["dummy", 2180] ],
   },
   forest: {
@@ -190,7 +195,7 @@ const MAPS = {
       { x: 3460, text: "전방: 학기말 실기 시험장!" },
       { x: 4340, text: "1학기 수료! — 다음 업데이트에서 계속" },
     ],
-    portals: [ { x: 110, to: "campus", tx: 2740, label: "캠퍼스" } ],
+    portals: [ { x: 110, to: "campus", tx: 2740, ty: 640, label: "캠퍼스" } ],
     mobs: [
       ["slime", 1560, 1500, 1720], ["slime", 1840, 1760, 1980],
       ["slime", 2120, 2020, 2260], ["slime", 2320, 2240, 2440],
@@ -198,11 +203,49 @@ const MAPS = {
       ["mushroom", 3080, 3000, 3220],
     ],
   },
+  basement: {
+    name: "학교 지하실", w: 3400, theme: "basement",
+    // 긴 계단(입구 착지대 → 우하향) + 층층이 갈라지는 미로형 발판
+    platforms: [
+      { x: 20,   y: 210, w: 360, h: 14 },   // 입구 착지대(상단)
+      { x: 380,  y: 275, w: 130, h: 14 },   // 계단
+      { x: 510,  y: 340, w: 130, h: 14 },
+      { x: 640,  y: 405, w: 130, h: 14 },
+      { x: 770,  y: 470, w: 130, h: 14 },
+      { x: 900,  y: 535, w: 130, h: 14 },
+      // 미로 구간
+      { x: 1150, y: 520, w: 160, h: 14 },
+      { x: 1380, y: 440, w: 150, h: 14 },   // 위 분기
+      { x: 1610, y: 360, w: 150, h: 14 },
+      { x: 1560, y: 560, w: 210, h: 14 },   // 아래 분기
+      { x: 1900, y: 470, w: 160, h: 14 },
+      { x: 2150, y: 380, w: 150, h: 14 },
+      { x: 2130, y: 585, w: 190, h: 14 },
+      { x: 2400, y: 300, w: 150, h: 14 },   // 높은 막다른 곳
+      { x: 2440, y: 500, w: 170, h: 14 },
+      { x: 2700, y: 420, w: 160, h: 14 },
+      { x: 2950, y: 520, w: 180, h: 14 },
+    ],
+    signs: [
+      { x: 200, text: "학교 지하실 — 관계자 외 출입 금지" },
+    ],
+    portals: [ { x: 90, to: "campus", tx: 1750, ty: 640, label: "↑ 캠퍼스로", tint: "#8b5cf6" } ],
+    torches: [ 200, 640, 1150, 1650, 2150, 2650, 3080 ],
+    door: { x: 3230 },
+    mobs: [
+      ["bat", 1500, 1300, 1720, 380],
+      ["bat", 2050, 1880, 2280, 300],
+      ["bat", 2600, 2380, 2860, 360],
+      ["bat", 3060, 2900, 3200, 290],
+    ],
+  },
 };
 
 let curMapId = "campus";
 let mapW = MAPS.campus.w, mapTheme = "campus";
 let platforms = [], signs = [], portals = [];
+let mapTorches = [], mapDoor = null;
+let doorTalks = 0;
 
 // 배경 나무(숲 테마) — 결정적 배치
 const bgTrees = [];
@@ -210,22 +253,24 @@ for(let i=0;i<34;i++){
   bgTrees.push({ x: 60 + i*130 + (i*97 % 50), h: 180 + (i*53 % 120), layer: i%2 });
 }
 
-let transition = null;   // { t, phase:"out"|"in", to, tx }
-function startTransition(to, tx){
+let transition = null;   // { t, phase:"out"|"in", to, tx, ty }
+function startTransition(to, tx, ty){
   if(transition) return;
-  transition = { t: 0, phase: "out", to, tx };
+  transition = { t: 0, phase: "out", to, tx, ty };
 }
 
-function loadMap(id, spawnX){
+function loadMap(id, spawnX, spawnY){
   const M = MAPS[id];
   curMapId = id;
   mapW = M.w; mapTheme = M.theme;
   platforms = [{ x: 0, y: GROUND_Y, w: M.w, h: 80, solidGround: true }, ...M.platforms];
   signs = M.signs; portals = M.portals;
+  mapTorches = M.torches || [];
+  mapDoor = M.door || null;
   // 몬스터 리스폰 (일회성 보스 제외)
   monsters.length = 0;
   BOSS_M = null;
-  for(const md of M.mobs) spawnMob(md[0], md[1], md[2], md[3]);
+  for(const md of M.mobs) spawnMob(md[0], md[1], md[2], md[3], md[4]);
   if(id === "forest"){
     spawnMob("boss", 4100, 4100, 4100);
     BOSS_M = monsters[monsters.length - 1];
@@ -236,7 +281,7 @@ function loadMap(id, spawnX){
   projectiles.length = 0; fields.length = 0;
   particles.length = 0; dmgNumbers.length = 0; floatTexts.length = 0;
   player.x = clamp(spawnX, P.w/2, mapW - P.w/2);
-  player.y = GROUND_Y; player.vx = 0; player.vy = 0;
+  player.y = spawnY ?? GROUND_Y; player.vx = 0; player.vy = 0;
   camX = clamp(player.x - VIEW_W/2, 0, Math.max(0, mapW - VIEW_W));
   addFloatText(player.x, GROUND_Y - 130, M.name, "#8be9fd");
 }
@@ -482,6 +527,25 @@ function nextLessonInfo(){
     if(st.idx < t.lessons.length) return { type: "avail", t };
   }
   return null;
+}
+
+// 의문의 문 — 잠긴 채 불길한 대사만 (미래 콘텐츠 훅)
+function talkToDoor(){
+  const sets = [
+    [ "이 문은… 굳게 잠겨 있다.",
+      "표면에 낯선 룬이 희미하게 맥동하고 있다.",
+      "문 너머에서 아주 희미한 숨소리가 새어 나오는 것 같다…" ],
+    [ "아무리 밀어도 꿈쩍도 하지 않는다.",
+      "차가운 철문에 손을 대자, 오히려 미지근한 온기가 느껴진다.",
+      "…지금은 열 방법이 없다. 언젠가, 자격을 갖춘 자에게만 열릴 것이다." ],
+    [ "룬이 잠시 붉게 번지더니 다시 잦아든다.",
+      "\"…아직 이르다.\" — 어디선가 목소리가 스친 듯하다." ],
+  ];
+  const lines = sets[doorTalks % sets.length];
+  doorTalks++;
+  juice.addShake(0.06);
+  spawnParticles(mapDoor.x, GROUND_Y - 80, { n: 10, col: ["#b45cff","#7c3aed","#4ade80"], sp0: 20, sp1: 90, l0: .4, l1: .9, add: true, grav: -30 });
+  startDialog(lines, null, "의문의 문");
 }
 
 // --- 화염 장판
@@ -881,10 +945,11 @@ function explodeFireball(pr){
 
 // ============================== MONSTERS ==============================
 const monsters = [];
-function spawnMob(type, x, patrolMin, patrolMax){
+function spawnMob(type, x, patrolMin, patrolMax, y){
   const d = MOB_DEFS[type];
+  const by = y ?? GROUND_Y;
   monsters.push({
-    type, x, y: GROUND_Y, vx: 0, dir: Math.random()<0.5?-1:1,
+    type, x, y: by, baseY: by, vx: 0, dir: Math.random()<0.5?-1:1,
     hp: d.hp, maxHp: d.hp,
     patrolMin: patrolMin ?? x - 120, patrolMax: patrolMax ?? x + 120,
     spawnX: x, dead: false, respawn: 0,
@@ -906,7 +971,7 @@ function updateMonsters(dt){
     if(m.dead){
       m.respawn -= dt;
       if(m.respawn <= 0 && m.type !== "dummy" && m.type !== "boss"){
-        m.dead = false; m.hp = m.maxHp; m.x = m.spawnX; m.y = GROUND_Y;
+        m.dead = false; m.hp = m.maxHp; m.x = m.spawnX; m.y = m.baseY;
         m.kbVx = 0; m.hpBarTimer = 0;
         spawnParticles(m.x, m.y - d.h/2, { n: 8, col: "#a78bfa", sp0: 40, sp1: 140, l0: .2, l1: .5, add: true });
       }
@@ -920,7 +985,13 @@ function updateMonsters(dt){
       m.kbVx *= Math.pow(0.0018, dt);
     }else m.kbVx = 0;
 
-    if(d.speed > 0){
+    if(m.type === "bat"){
+      // 부유 몬스터: 중력 없이 좌우 순찰 + 상하 흔들림
+      m.x += m.dir * d.speed * dt;
+      if(m.x < m.patrolMin){ m.x = m.patrolMin; m.dir = 1; }
+      if(m.x > m.patrolMax){ m.x = m.patrolMax; m.dir = -1; }
+      m.y = m.baseY + Math.sin(m.animT * 3) * 16;
+    }else if(d.speed > 0){
       m.x += m.dir * d.speed * dt;
       if(m.x < m.patrolMin){ m.x = m.patrolMin; m.dir = 1; }
       if(m.x > m.patrolMax){ m.x = m.patrolMax; m.dir = -1; }
@@ -1116,7 +1187,7 @@ function update(dt){
   if(transition){
     transition.t += dt * 3;
     if(transition.phase === "out" && transition.t >= 1){
-      loadMap(transition.to, transition.tx);
+      loadMap(transition.to, transition.tx, transition.ty);
       transition.phase = "in"; transition.t = 0;
       saveGame();
     }else if(transition.phase === "in" && transition.t >= 1){
@@ -1128,16 +1199,29 @@ function update(dt){
   if(dialog){
     if(pressed["e"] || pressed["z"] || pressed["space"]) advanceDialog();
   }else if(!showBook && !transition && !player.dead){
+    let used = false;
     if(player.onGround && (pressed["ArrowUp"] || pressed["e"])){
       for(const p of portals){
-        if(Math.abs(player.x - p.x) < 46){ startTransition(p.to, p.tx); break; }
+        const py = p.y ?? GROUND_Y;
+        if(Math.abs(player.x - p.x) < 46 && Math.abs(player.y - py) < 90){
+          startTransition(p.to, p.tx, p.ty); used = true; break;
+        }
       }
     }
-    if(!transition && pressed["e"] && curMapId === "campus"){
+    if(!used && !transition && pressed["e"] && curMapId === "campus"){
       for(const t of TEACHERS){
-        if(Math.abs(player.x - t.x) < 60){ talkToTeacher(t); break; }
+        if(Math.abs(player.x - t.x) < 60){ talkToTeacher(t); used = true; break; }
       }
     }
+    if(!used && !transition && pressed["e"] && mapDoor && Math.abs(player.x - mapDoor.x) < 62){
+      talkToDoor();
+    }
+  }
+
+  // 지하실 분위기: 떠다니는 먼지
+  if(curMapId === "basement" && !transition && Math.random() < 0.5){
+    spawnParticles(camX + rand(-20, VIEW_W + 20), rand(90, GROUND_Y - 20),
+      { n: 1, col: ["#4a5d4a","#3a4a5a","#2f3b30"], sp0: 1, sp1: 8, l0: 1.6, l1: 3.4, grav: 6, drag: 0.995, r0: 1, r1: 2 });
   }
 
   // --- 자동 저장 / 초기화(F2 두 번)
@@ -1200,12 +1284,16 @@ function render(){
   camX = lerp(camX, targetCam, 0.12);
   const sh = juice.shakeOffset();
 
-  // --- 하늘
+  // --- 하늘 / 배경 톤
   const sky = ctx.createLinearGradient(0, 0, 0, VIEW_H);
   if(mapTheme === "campus"){
     sky.addColorStop(0, "#1a1533");
     sky.addColorStop(0.6, "#2c2350");
     sky.addColorStop(1, "#3a2b55");
+  }else if(mapTheme === "basement"){
+    sky.addColorStop(0, "#07080c");
+    sky.addColorStop(0.6, "#0d1013");
+    sky.addColorStop(1, "#12100e");
   }else{
     sky.addColorStop(0, "#141a33");
     sky.addColorStop(0.6, "#23294d");
@@ -1214,11 +1302,13 @@ function render(){
   ctx.fillStyle = sky;
   ctx.fillRect(0, 0, VIEW_W, VIEW_H);
 
-  // 달
-  ctx.fillStyle = "#e9e6ff";
-  ctx.beginPath(); ctx.arc(1080 - camX*0.05, 110, 38, 0, Math.PI*2); ctx.fill();
-  ctx.fillStyle = mapTheme === "campus" ? "#1a1533" : "#141a33";
-  ctx.beginPath(); ctx.arc(1094 - camX*0.05, 100, 34, 0, Math.PI*2); ctx.fill();
+  // 달 (지하실엔 없음)
+  if(mapTheme !== "basement"){
+    ctx.fillStyle = "#e9e6ff";
+    ctx.beginPath(); ctx.arc(1080 - camX*0.05, 110, 38, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = mapTheme === "campus" ? "#1a1533" : "#141a33";
+    ctx.beginPath(); ctx.arc(1094 - camX*0.05, 100, 34, 0, Math.PI*2); ctx.fill();
+  }
 
   ctx.save();
   ctx.translate(sh.x, sh.y);
@@ -1243,6 +1333,24 @@ function render(){
         ctx.fillRect(tx - 18, GROUND_Y - th + 34 + wy*56, 10, 16);
         ctx.fillRect(tx + 8,  GROUND_Y - th + 34 + wy*56, 10, 16);
       }
+    }
+  }else if(mapTheme === "basement"){
+    // 벽돌 벽 (패럴럭스 약간)
+    const bx0 = -((camX * 0.5) % 80);
+    for(let row = 0; row * 40 < VIEW_H; row++){
+      const oy = row * 40;
+      const off = (row % 2) ? 40 : 0;
+      for(let bx = bx0 - 80; bx < VIEW_W + 80; bx += 80){
+        ctx.fillStyle = (Math.floor((bx + off) / 80) + row) % 5 === 0 ? "#171a1e" : "#1b1f22";
+        ctx.fillRect(bx + off, oy, 76, 36);
+      }
+    }
+    // 이끼/얼룩
+    for(let i = 0; i < 6; i++){
+      const sx = ((i * 520) - camX * 0.5) % (VIEW_W + 200);
+      const x = sx < -100 ? sx + VIEW_W + 200 : sx;
+      ctx.fillStyle = "rgba(40,60,40,.25)";
+      ctx.beginPath(); ctx.ellipse(x, 140 + (i*63 % 260), 60, 34, 0, 0, Math.PI*2); ctx.fill();
     }
   }else{
     for(const t of bgTrees){
@@ -1271,6 +1379,13 @@ function render(){
         ctx.fillRect(pf.x, pf.y, pf.w, 10);
         ctx.fillStyle = "rgba(0,0,0,.15)";
         for(let bx = 0; bx < pf.w; bx += 90) ctx.fillRect(pf.x + bx, pf.y + 10, 3, pf.h - 10);
+      }else if(mapTheme === "basement"){
+        ctx.fillStyle = "#22201c";
+        ctx.fillRect(pf.x, pf.y, pf.w, pf.h);
+        ctx.fillStyle = "#33302a";
+        ctx.fillRect(pf.x, pf.y, pf.w, 8);
+        ctx.fillStyle = "rgba(0,0,0,.3)";
+        for(let bx = 0; bx < pf.w; bx += 70) ctx.fillRect(pf.x + bx, pf.y + 8, 2, pf.h - 8);
       }else{
         ctx.fillStyle = "#2d3b2d";
         ctx.fillRect(pf.x, pf.y, pf.w, pf.h);
@@ -1278,9 +1393,9 @@ function render(){
         ctx.fillRect(pf.x, pf.y, pf.w, 10);
       }
     }else{
-      ctx.fillStyle = mapTheme === "campus" ? "#4a4f6a" : "#5b4636";
+      ctx.fillStyle = mapTheme === "campus" ? "#4a4f6a" : mapTheme === "basement" ? "#2d2a24" : "#5b4636";
       ctx.fillRect(pf.x, pf.y, pf.w, pf.h);
-      ctx.fillStyle = mapTheme === "campus" ? "#6a7194" : "#7a9b5e";
+      ctx.fillStyle = mapTheme === "campus" ? "#6a7194" : mapTheme === "basement" ? "#403b32" : "#7a9b5e";
       ctx.fillRect(pf.x, pf.y, pf.w, 5);
     }
   }
@@ -1302,28 +1417,38 @@ function render(){
 
   // --- 포탈
   for(const p of portals){
+    const py = p.y ?? GROUND_Y;
     const pulse = 0.6 + Math.sin(performance.now()/300) * 0.25;
-    ctx.fillStyle = mapTheme === "campus" ? "#565f7d" : "#5b4636";
-    ctx.fillRect(p.x - 44, GROUND_Y - 130, 12, 130);
-    ctx.fillRect(p.x + 32, GROUND_Y - 130, 12, 130);
-    ctx.fillRect(p.x - 50, GROUND_Y - 142, 100, 14);
+    const tint = p.tint || "#8b5cf6";
+    ctx.fillStyle = mapTheme === "campus" ? "#565f7d" : mapTheme === "basement" ? "#2d2a24" : "#5b4636";
+    ctx.fillRect(p.x - 44, py - 130, 12, 130);
+    ctx.fillRect(p.x + 32, py - 130, 12, 130);
+    ctx.fillRect(p.x - 50, py - 142, 100, 14);
+    if(p.down){
+      // 아래로 내려가는 계단 입구 느낌
+      ctx.fillStyle = "#0a0b0f";
+      ctx.fillRect(p.x - 32, py - 128, 64, 128);
+      ctx.fillStyle = "rgba(0,0,0,.55)";
+      for(let s = 0; s < 5; s++) ctx.fillRect(p.x - 30 + s*4, py - 24 - s*22, 60 - s*8, 8);
+    }
     ctx.save();
     ctx.globalCompositeOperation = "lighter";
     ctx.globalAlpha = pulse;
-    const pg = ctx.createRadialGradient(p.x, GROUND_Y - 65, 4, p.x, GROUND_Y - 65, 46);
-    pg.addColorStop(0, "#c4b5fd");
-    pg.addColorStop(0.5, "#8b5cf6");
-    pg.addColorStop(1, "rgba(120,80,220,0)");
+    const pg = ctx.createRadialGradient(p.x, py - 65, 4, p.x, py - 65, 46);
+    pg.addColorStop(0, "#ffffff");
+    pg.addColorStop(0.4, tint);
+    pg.addColorStop(1, "rgba(0,0,0,0)");
     ctx.fillStyle = pg;
-    ctx.beginPath(); ctx.ellipse(p.x, GROUND_Y - 65, 34, 58, 0, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(p.x, py - 65, 34, 58, 0, 0, Math.PI*2); ctx.fill();
     ctx.restore();
+    ctx.textAlign = "center";
     ctx.font = "bold 13px sans-serif"; ctx.fillStyle = "#c4b5fd";
-    ctx.fillText(p.label, p.x, GROUND_Y - 152);
-    if(!dialog && !transition && Math.abs(player.x - p.x) < 46){
+    ctx.fillText(p.label, p.x, py - 152);
+    if(!dialog && !transition && Math.abs(player.x - p.x) < 46 && Math.abs(player.y - py) < 90){
       ctx.fillStyle = "rgba(10,12,24,.8)";
-      roundRect(p.x - 38, GROUND_Y - 186, 76, 22, 6); ctx.fill();
+      roundRect(p.x - 44, py - 186, 88, 22, 6); ctx.fill();
       ctx.fillStyle = "#8be9fd";
-      ctx.fillText("↑ 이동", p.x, GROUND_Y - 170);
+      ctx.fillText(p.down ? "↑ 내려가기" : "↑ 이동", p.x, py - 170);
     }
   }
 
@@ -1370,6 +1495,36 @@ function render(){
       ctx.beginPath(); ctx.arc(e.x, e.y, e.r*2, 0, Math.PI*2); ctx.fill();
       ctx.restore();
     }
+  }
+
+  // --- 지하실: 횃불 + 의문의 문
+  if(curMapId === "basement"){
+    for(const tx of mapTorches){
+      const ty = GROUND_Y - 250;
+      // 브래킷
+      ctx.fillStyle = "#3a3128";
+      ctx.fillRect(tx - 3, ty, 6, 30);
+      ctx.fillStyle = "#2a2018";
+      ctx.fillRect(tx - 7, ty + 28, 14, 6);
+      // 불꽃
+      const fl = 4 + Math.sin(performance.now()/70 + tx) * 2;
+      ctx.save();
+      ctx.globalCompositeOperation = "lighter";
+      const fg = ctx.createRadialGradient(tx, ty - 6, 2, tx, ty - 6, 60 + fl*3);
+      fg.addColorStop(0, "rgba(255,220,150,.9)");
+      fg.addColorStop(0.25, "rgba(255,140,50,.5)");
+      fg.addColorStop(1, "rgba(255,90,20,0)");
+      ctx.fillStyle = fg;
+      ctx.beginPath(); ctx.arc(tx, ty - 6, 60 + fl*3, 0, Math.PI*2); ctx.fill();
+      ctx.fillStyle = "#ffe08a";
+      ctx.beginPath();
+      ctx.moveTo(tx - 5, ty); ctx.lineTo(tx, ty - 16 - fl); ctx.lineTo(tx + 5, ty);
+      ctx.closePath(); ctx.fill();
+      ctx.restore();
+      if(Math.random() < 0.15)
+        spawnParticles(tx, ty - 12, { n: 1, col: ["#ffb35c","#ffd27f"], sp0: 6, sp1: 26, l0: .4, l1: .9, add: true, grav: -50, r0: 1, r1: 2 });
+    }
+    if(mapDoor) drawMysteryDoor(mapDoor.x);
   }
 
   // --- 화염 장판
@@ -1440,6 +1595,33 @@ function render(){
       ctx.fillStyle = "#111";
       ctx.fillRect(m.x - 8 + m.dir*3, m.y - d.h/2 - 4, 4, 6);
       ctx.fillRect(m.x + 4 + m.dir*3, m.y - d.h/2 - 4, 4, 6);
+    }else if(m.type === "bat"){
+      const flap = Math.sin(m.animT * 12) * 7;
+      ctx.fillStyle = m.hurtFlash > 0 ? "#fff" : "#2a2438";
+      // 날개
+      ctx.beginPath();
+      ctx.moveTo(m.x, m.y - 10);
+      ctx.lineTo(m.x - 20, m.y - 17 - flap);
+      ctx.lineTo(m.x - 14, m.y - 8);
+      ctx.lineTo(m.x - 7, m.y - 11);
+      ctx.closePath(); ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(m.x, m.y - 10);
+      ctx.lineTo(m.x + 20, m.y - 17 - flap);
+      ctx.lineTo(m.x + 14, m.y - 8);
+      ctx.lineTo(m.x + 7, m.y - 11);
+      ctx.closePath(); ctx.fill();
+      // 몸통
+      ctx.beginPath(); ctx.ellipse(m.x, m.y - 9, 7, 8, 0, 0, Math.PI*2); ctx.fill();
+      // 귀
+      ctx.beginPath();
+      ctx.moveTo(m.x - 5, m.y - 15); ctx.lineTo(m.x - 3, m.y - 22); ctx.lineTo(m.x - 1, m.y - 15);
+      ctx.moveTo(m.x + 5, m.y - 15); ctx.lineTo(m.x + 3, m.y - 22); ctx.lineTo(m.x + 1, m.y - 15);
+      ctx.fill();
+      // 눈
+      ctx.fillStyle = m.hurtFlash > 0 ? "#000" : "#ff5a5a";
+      ctx.fillRect(m.x - 4, m.y - 11, 2, 3);
+      ctx.fillRect(m.x + 2, m.y - 11, 2, 3);
     }else{
       ctx.fillStyle = m.hurtFlash > 0 ? "#fff" : "#e8d8b0";
       ctx.fillRect(r.x + 6, r.y + 14, d.w - 12, d.h - 14);
@@ -1554,6 +1736,17 @@ function render(){
     ctx.fillRect(0, 0, VIEW_W, VIEW_H);
   }
 
+  // 지하실 비네트 (시야 제한 + 지팡이 오브 주변만 은은히 밝게)
+  if(mapTheme === "basement"){
+    const plsx = player.x - camX + juice.shakeOffset().x*0;
+    const vg = ctx.createRadialGradient(plsx, VIEW_H/2, 120, plsx, VIEW_H/2, 640);
+    vg.addColorStop(0, "rgba(0,0,0,0)");
+    vg.addColorStop(0.6, "rgba(3,4,7,0.4)");
+    vg.addColorStop(1, "rgba(2,3,5,0.82)");
+    ctx.fillStyle = vg;
+    ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+  }
+
   renderHUD();
 
   // --- 맵 전환 페이드
@@ -1576,6 +1769,72 @@ function drawThornWall(x){
     ctx.lineTo(x + dirn*26, wy - 10);
     ctx.lineTo(x, wy - 18);
     ctx.closePath(); ctx.fill();
+  }
+}
+
+function drawMysteryDoor(x){
+  const y = GROUND_Y, W = 96, H = 168;
+  const pulse = 0.5 + Math.sin(performance.now()/650) * 0.5;
+  // 뒤쪽 오라
+  ctx.save();
+  ctx.globalCompositeOperation = "lighter";
+  ctx.globalAlpha = 0.25 + pulse * 0.35;
+  const ag = ctx.createRadialGradient(x, y - H/2, 10, x, y - H/2, 130);
+  ag.addColorStop(0, "#7c3aed");
+  ag.addColorStop(0.5, "rgba(124,58,237,.35)");
+  ag.addColorStop(1, "rgba(74,222,128,0)");
+  ctx.fillStyle = ag;
+  ctx.beginPath(); ctx.arc(x, y - H/2, 130, 0, Math.PI*2); ctx.fill();
+  ctx.restore();
+  // 석재 아치 틀
+  ctx.fillStyle = "#2b2620";
+  ctx.fillRect(x - W/2 - 12, y - H - 14, W + 24, H + 14);
+  ctx.beginPath(); ctx.arc(x, y - H - 14, W/2 + 12, Math.PI, 0); ctx.fill();
+  // 문짝 (검은 철문)
+  ctx.fillStyle = "#14110f";
+  ctx.fillRect(x - W/2, y - H, W, H);
+  ctx.beginPath(); ctx.arc(x, y - H, W/2, Math.PI, 0); ctx.fill();
+  // 문 중앙 분리선 + 철판 리벳
+  ctx.strokeStyle = "#0a0908"; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(x, y - H + 6); ctx.lineTo(x, y - 4); ctx.stroke();
+  ctx.fillStyle = "#3a332a";
+  for(let ry = y - H + 20; ry < y - 12; ry += 34){
+    ctx.fillRect(x - W/2 + 8, ry, 5, 5);
+    ctx.fillRect(x + W/2 - 13, ry, 5, 5);
+  }
+  // 맥동하는 룬 (원 + 눈)
+  ctx.save();
+  ctx.globalCompositeOperation = "lighter";
+  ctx.globalAlpha = 0.4 + pulse * 0.6;
+  ctx.strokeStyle = "#9d5cff"; ctx.lineWidth = 2.5;
+  ctx.beginPath(); ctx.arc(x, y - H*0.55, 22, 0, Math.PI*2); ctx.stroke();
+  ctx.beginPath(); ctx.arc(x, y - H*0.55, 13, 0, Math.PI*2); ctx.stroke();
+  // 세로 룬 문양
+  for(let i = -1; i <= 1; i++){
+    ctx.beginPath();
+    ctx.moveTo(x + i*8, y - H*0.55 - 8);
+    ctx.lineTo(x + i*8, y - H*0.55 + 8);
+    ctx.stroke();
+  }
+  // 중앙 눈
+  ctx.fillStyle = `rgba(255,80,60,${0.3 + pulse*0.6})`;
+  ctx.beginPath(); ctx.ellipse(x, y - H*0.55, 6, 3.5, 0, 0, Math.PI*2); ctx.fill();
+  ctx.restore();
+  // 가로지른 사슬
+  ctx.strokeStyle = "#4a4038"; ctx.lineWidth = 5;
+  ctx.beginPath(); ctx.moveTo(x - W/2 - 6, y - H*0.7); ctx.lineTo(x + W/2 + 6, y - H*0.32); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(x - W/2 - 6, y - H*0.32); ctx.lineTo(x + W/2 + 6, y - H*0.7); ctx.stroke();
+  ctx.fillStyle = "#5a5048";
+  ctx.beginPath(); ctx.arc(x, y - H*0.51, 7, 0, Math.PI*2); ctx.fill();   // 자물쇠
+  // 라벨 + 프롬프트
+  ctx.textAlign = "center";
+  ctx.font = "bold 12px sans-serif"; ctx.fillStyle = "#b48cff";
+  ctx.fillText("의문의 문", x, y - H - 22);
+  if(!dialog && !transition && !player.dead && Math.abs(player.x - x) < 62){
+    ctx.fillStyle = "rgba(10,12,24,.8)";
+    roundRect(x - 46, y - H - 50, 92, 22, 6); ctx.fill();
+    ctx.fillStyle = "#8be9fd"; ctx.font = "bold 13px sans-serif";
+    ctx.fillText("E 살펴보기", x, y - H - 34);
   }
 }
 
@@ -2024,7 +2283,7 @@ function renderHUD(){
 
   ctx.textAlign = "right";
   ctx.font = "11px sans-serif"; ctx.fillStyle = "rgba(148,163,184,.55)";
-  ctx.fillText("아르카나 아카데미 프로토타입 v0.6 — 마법학교 편", VIEW_W - 14, 22);
+  ctx.fillText("아르카나 아카데미 프로토타입 v0.7 — 지하실", VIEW_W - 14, 22);
   if(saveFlash > 0){
     ctx.globalAlpha = Math.min(1, saveFlash);
     ctx.font = "12px sans-serif"; ctx.fillStyle = "#4ade80";
