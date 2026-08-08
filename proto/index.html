@@ -1,0 +1,1244 @@
+<meta charset="utf-8">
+<title>성창 — 신전 수련장 (맵 프로토 v1.0)</title>
+<style>
+  html,body{margin:0;height:100%;background:#05070d;overflow:hidden;
+    font-family:"Pretendard","Malgun Gothic","Apple SD Gothic Neo",system-ui,sans-serif;}
+  canvas{display:block;cursor:grab}
+  canvas.drag{cursor:grabbing}
+</style>
+<canvas id="c"></canvas>
+<script>
+"use strict";
+/* =====================================================================
+   성창(聖槍) — 잊힌 성물 · 「신전 수련장」 맵 프로토타입 v1.0
+   ---------------------------------------------------------------------
+   설계 원본: docs/specs/2026-08-07-temple-training-map.md
+   좌표계   : 유닛(u). 좌하단 원점, +x 오른쪽, +y 위. (1u = 100px @PPU100)
+   현 단계  : 맵 지오메트리 + 신전 아트만 구현. 캐릭터/전투는 다음 단계.
+              → 자유 카메라 뷰어로 전 층 순회·좌표 검증 가능.
+   ===================================================================== */
+
+/* ------------------------------------------------------------------ */
+/* 0. 물리 상수 (게이팅 검증용 — 캐릭터 미구현이나 도달성 판정에 사용)  */
+/* ------------------------------------------------------------------ */
+const REACH = {
+  jump:      1.6,   // 단일점프 높이
+  doubleJump:2.9,   // 이단강림 누적 높이
+  vault:     3.4,   // 창대 도약 정점
+  dashX:     3.0,   // 대시 수평 도달(최대)
+  spear:     5.0,   // 창 던지기 사거리
+};
+
+/* ------------------------------------------------------------------ */
+/* 1. 맵 데이터 — 층별 로컬 좌표 (설계 검증본 그대로) + 전역 Y오프셋    */
+/*    타입: solid / oneway / wall / spear / vault / fall / air / deco   */
+/* ------------------------------------------------------------------ */
+const FLOORS = [
+{
+  n:1, id:"plaza", name:"입구 대광장", sub:"Entry Grand Plaza",
+  yOff:0, w:34, h:6,
+  concept:"달리기·점프·대시·기본 3타 콤보. 창 꽂기 의도적 미등장.",
+  geo:[
+    {t:"solid", x:[0,34],     y:[0,1.0],    label:"대광장 바닥"},
+    {t:"wall",  x:[0,0.4],    y:[1.0,6.0],  label:"좌 경계벽"},
+    {t:"wall",  x:[33.6,34],  y:[5.0,6.0],  label:"우 경계벽"},
+    {t:"solid", x:[24,27],    y:[2.2,2.4],  label:"계단 P1"},
+    {t:"solid", x:[29,31],    y:[3.4,3.6],  label:"계단 P2"},
+    {t:"solid", x:[31,34],    y:[4.8,5.0],  label:"출구 렛지 P3"},
+  ],
+  pillars:[ {x:6,w:1.1,y0:1,y1:5.4},{x:11,w:1.1,y0:1,y1:5.4},
+            {x:16,w:1.1,y0:1,y1:5.4},{x:21,w:1.1,y0:1,y1:5.4} ],
+  spawn:{x:2.0,y:1.0},
+  shrines:[{x:4.5,y:1.0,id:"사당1",note:"정본"}],
+  exit:{x:32.5,y:5.0,to:2},
+  dummies:[ {x:8,y:1,k:"g"},{x:13,y:1,k:"g"},{x:18,y:1,k:"g"} ],
+},
+{
+  n:2, id:"corridor", name:"부서진 회랑", sub:"Broken Corridor",
+  yOff:6, w:28, h:7,
+  concept:"동일 2.5u 갭 반복 대시점프 + 기둥머리 위 공중 허수아비 에어콤보.",
+  geo:[
+    {t:"solid", x:[0.4,26],   y:[0,1.0],    label:"회복 바닥(세이프티)"},
+    {t:"wall",  x:[0,0.4],    y:[0,7],      label:"좌 경계벽"},
+    {t:"wall",  x:[27.6,28],  y:[0,7],      label:"우 경계벽"},
+    {t:"wall",  x:[5,6],      y:[1.0,2.0],  label:"기둥 A 몸통"},
+    {t:"oneway",x:[4.5,6.5],  y:[2.0,2.2],  label:"기둥머리 A"},
+    {t:"wall",  x:[9.5,10.5], y:[1.0,2.6],  label:"기둥 B 몸통"},
+    {t:"oneway",x:[9,11],     y:[2.6,2.8],  label:"기둥머리 B"},
+    {t:"wall",  x:[14,15],    y:[1.0,3.2],  label:"기둥 C 몸통"},
+    {t:"oneway",x:[13.5,15.5],y:[3.2,3.4],  label:"기둥머리 C"},
+    {t:"wall",  x:[18.5,19.5],y:[1.0,3.8],  label:"기둥 D 몸통"},
+    {t:"oneway",x:[18,20],    y:[3.8,4.0],  label:"기둥머리 D"},
+    {t:"solid", x:[22.5,27.6],y:[4.6,4.8],  label:"출구 렛지"},
+    {t:"deco",  x:[7.5,8.2],  y:[1.0,1.6],  label:"그루터기"},
+    {t:"deco",  x:[16.5,17.2],y:[1.0,1.6],  label:"그루터기"},
+  ],
+  entry:{x:2.0,y:1.0,from:1},
+  exit:{x:26.5,y:4.8,to:3},
+  dummies:[ {x:3.5,y:1.0,k:"g"},{x:10,y:4.2,k:"a"},{x:14.5,y:4.9,k:"a"},{x:19,y:5.5,k:"a"} ],
+},
+{
+  n:3, id:"shaft", name:"첫 벽등반 샤프트", sub:"First Ascent Shaft",
+  yOff:13, w:7, h:16,
+  concept:"★창 꽂기 발판 첫 공개★ 필수 갭 3.6·4.4u > 이단강림 2.9u → 창 없이는 불가.",
+  geo:[
+    {t:"wall",  x:[0,0.5],    y:[0,16],     label:"좌 경계벽"},
+    {t:"wall",  x:[6.5,7.0],  y:[0,16],     label:"우 경계벽"},
+    {t:"solid", x:[0.5,6.5],  y:[0,1.0],    label:"바닥 안전지대"},
+    {t:"air",   x:[0.5,6.5],  y:[1.0,13.0], label:"중앙 우물(낙하)"},
+    {t:"wall",  x:[2.5,3.0],  y:[1.0,5.0],  label:"워밍업 기둥"},
+    {t:"solid", x:[2.3,3.5],  y:[5.0,5.2],  label:"기둥머리 R1"},
+    {t:"solid", x:[0.5,2.0],  y:[8.6,8.8],  label:"좌벽 렛지 R2"},
+    {t:"solid", x:[0.5,2.2],  y:[13.0,13.2],label:"좌벽 렛지 R3"},
+    {t:"solid", x:[5.5,6.5],  y:[9.2,9.4],  label:"히든 알코브"},
+    {t:"solid", x:[4.5,6.5],  y:[14.3,14.5],label:"출구 렛지"},
+    {t:"spear", x:[0,0.5],    y:[6.0,13.5], face:"R", label:"좌벽 창꽂기면"},
+    {t:"spear", x:[6.5,7.0],  y:[8.5,10.0], face:"L", label:"우벽 창꽂기면(히든)"},
+  ],
+  entry:{x:1.5,y:1.0,from:2},
+  exit:{x:6.0,y:14.5,to:4},
+  shrines:[{x:1.5,y:1.0,id:"임시 강림점",note:"체크포인트"}],
+  crystals:[{x:6.0,y:9.9,note:"우벽 가로지르기 창꽂기(4.5u)"}],
+  dummies:[ {x:6.25,y:6.55,k:"w"},{x:5.7,y:10.6,k:"a"} ],
+  spearPlan:[
+    {from:[2.9,5.2], to:[0.5,6.5], note:"창① 좌벽 y6.5 → 발판 6.7"},
+    {from:[1.2,8.8], to:[0.5,10.1],note:"창② 좌벽 y10.1 → 발판 10.3"},
+    {from:[2.0,8.8], to:[6.5,9.2], note:"창③ 우벽(히든) 4.5u"},
+  ],
+},
+{
+  n:4, id:"fissure", name:"큰 균열 갭", sub:"The Great Fissure",
+  yOff:29, w:16, h:9,
+  concept:"대시점프 → 이단강림 → 수평형 창꽂기+창대도약 3비트 체이닝.",
+  geo:[
+    {t:"wall",  x:[0,0.5],    y:[0,9],      label:"좌 경계벽"},
+    {t:"wall",  x:[15.5,16],  y:[0,9],      label:"우 경계벽"},
+    {t:"solid", x:[0.5,2.6],  y:[0,1.5],    label:"진입 렛지"},
+    {t:"fall",  x:[2.6,13.5], y:[0,1.2],    label:"대균열 낙하존"},
+    {t:"wall",  x:[5.3,5.9],  y:[0,1.6],    label:"P1 몸통"},
+    {t:"oneway",x:[5.0,6.2],  y:[1.6,1.8],  label:"기둥머리 P1"},
+    {t:"solid", x:[8.6,9.6],  y:[3.4,3.6],  label:"좁은 렛지 P2"},
+    {t:"wall",  x:[11.5,12.3],y:[0,5.0],    label:"먼 기둥"},
+    {t:"spear", x:[11.5,11.6],y:[0,5.0],    face:"L", label:"먼 기둥 좌면(창표적)"},
+    {t:"solid", x:[11.4,12.4],y:[5.0,5.2],  label:"먼 기둥 머리"},
+    {t:"solid", x:[13.5,15.5],y:[0,6.5],    label:"출구 렛지"},
+  ],
+  entry:{x:1.5,y:1.5,from:3},
+  exit:{x:14.5,y:6.5,to:5},
+  crystals:[{x:12.6,y:7.5,note:"마지막 창대 도약 정타 시 스침"}],
+  dummies:[ {x:6.0,y:1.8,k:"g"},{x:7.4,y:4.6,k:"a"},{x:11.9,y:5.2,k:"g"} ],
+  spearPlan:[ {from:[9.6,3.6], to:[11.5,4.5], note:"창 y4.5 → 발판 4.6 → 창대도약 정점 8.0"} ],
+},
+{
+  n:5, id:"arena", name:"수련 아레나", sub:"The Trial Arena",
+  yOff:38, w:18, h:10,
+  concept:"전투 종합 — i-frame 회피·창강화 게이지·전투용 창꽂기 발판 위 에어콤보.",
+  geo:[
+    {t:"wall",  x:[0,0.5],    y:[0,10],     label:"좌 경계벽"},
+    {t:"wall",  x:[17.5,18],  y:[0,10],     label:"우 경계벽"},
+    {t:"solid", x:[0.5,17.5], y:[0,1.0],    label:"아레나 바닥(연속)"},
+    {t:"solid", x:[6.0,7.8],  y:[0,2.4],    label:"중앙 대리석 단"},
+    {t:"spear", x:[6.0,6.1],  y:[1.0,2.4],  face:"L", label:"중앙 단 좌면(보조)"},
+    {t:"solid", x:[11.6,12.2],y:[2.0,6.0],  label:"★수련 기둥(부유)"},
+    {t:"spear", x:[11.6,11.7],y:[2.0,5.0],  face:"L", label:"수련 기둥 좌면(시그니처)"},
+    {t:"oneway",x:[4.0,5.2],  y:[3.1,3.2],  label:"기둥머리 P-air1"},
+    {t:"solid", x:[13.0,14.5],y:[2.8,3.0],  label:"코니스(중단 렛지)"},
+    {t:"oneway",x:[13.3,14.3],y:[4.4,4.5],  label:"기둥머리 P-air2"},
+    {t:"wall",  x:[14.5,15.0],y:[1.0,6.5],  label:"성물 기둥"},
+    {t:"spear", x:[14.5,14.6],y:[1.0,6.5],  face:"L", label:"성물 기둥 좌면(출구용)"},
+    {t:"solid", x:[15.3,17.5],y:[5.9,6.0],  label:"출구 렛지"},
+  ],
+  entry:{x:1.5,y:1.0,from:4},
+  exit:{x:16.5,y:6.0,to:6},
+  shrines:[{x:2.5,y:1.0,id:"사당2",note:"정본"}],
+  dummies:[
+    {x:4.5,y:1.0,k:"g"},{x:6.9,y:2.4,k:"g"},{x:10.0,y:1.0,k:"g"},
+    {x:4.6,y:3.9,k:"a"},{x:11.0,y:4.3,k:"a"},{x:14.0,y:5.4,k:"a"},
+    {x:0.65,y:3.2,k:"w"},{x:11.5,y:3.0,k:"w"},
+    {x:8.5,y:1.0,k:"c",note:"CT1 근접 예고"},{x:13.3,y:3.0,k:"c",note:"CT2 투사체"},
+  ],
+  spearPlan:[
+    {from:[10.6,1.0], to:[11.6,3.2], note:"시그니처: 발판 3.2 → 단일점프 4.8 → D-A2(4.3)"},
+    {from:[14.3,3.0], to:[14.5,4.4], note:"출구용: 발판 4.5 → 창대도약 7.9 → 출구 6.0"},
+  ],
+},
+{
+  n:6, id:"spire", name:"첨탑 상승", sub:"The Spire Ascent",
+  yOff:48, w:9, h:20,
+  concept:"벽점프→창꽂기→창대도약→이단강림 4대 이동기 연쇄. 전 구간 낙하존.",
+  geo:[
+    {t:"wall",  x:[0,0.3],    y:[0,20],     label:"좌벽"},
+    {t:"wall",  x:[8.7,9.0],  y:[0,20],     label:"우벽"},
+    {t:"fall",  x:[0.3,8.7],  y:[-2.0,0.2], label:"최하단 낙하존"},
+    {t:"solid", x:[0.3,2.5],  y:[0.2,0.5],  label:"진입 단 E"},
+    {t:"wall",  x:[2.6,3.0],  y:[0.8,4.5],  label:"기둥 PA(벽점프 슈트)"},
+    {t:"solid", x:[0.3,2.0],  y:[4.2,4.5],  label:"착지 단 L1"},
+    {t:"wall",  x:[5.5,5.9],  y:[4.0,9.0],  label:"수련 성구 PB"},
+    {t:"spear", x:[5.5,5.6],  y:[4.0,9.0],  face:"L", label:"PB 좌면(창표적)"},
+    {t:"solid", x:[0.3,2.2],  y:[7.2,7.5],  label:"착지 단 L2"},
+    {t:"vault", x:[2.2,2.9],  y:[7.5,8.0],  label:"도약 나브 NB1"},
+    {t:"solid", x:[3.0,5.5],  y:[10.7,11.0],label:"착지 단 L3(사당4)"},
+    {t:"spear", x:[8.4,8.7],  y:[10.0,15.0],face:"L", label:"우벽 창표적"},
+    {t:"solid", x:[6.0,7.4],  y:[13.7,14.0],label:"착지 단 L4"},
+    {t:"vault", x:[6.2,7.0],  y:[14.0,14.5],label:"도약 나브 NB2"},
+    {t:"solid", x:[3.5,6.0],  y:[16.7,17.0],label:"착지 단 L5"},
+    {t:"oneway",x:[3.5,6.5],  y:[18.8,19.0],label:"출구 단 XE(통과)"},
+    {t:"spear", x:[0.3,0.6],  y:[13.0,18.0],face:"R", label:"좌벽 창표적(히든)"},
+    {t:"solid", x:[0.3,1.8],  y:[15.2,15.5],label:"히든 단 HC"},
+  ],
+  entry:{x:1.2,y:0.5,from:5},
+  exit:{x:5.0,y:19.0,to:7,physical:true},
+  shrines:[{x:0.9,y:0.5,id:"사당3",note:"전반부"},{x:3.3,y:11.0,id:"사당4",note:"중단 체크포인트"}],
+  crystals:[{x:1.0,y:15.5,note:"창발판 미회수 유지 → HC 왕복"}],
+  spearPlan:[
+    {from:[2.0,4.5], to:[5.5,5.5],  note:"B2 시그니처 3.5u → 발판 5.5"},
+    {from:[5.5,11.0],to:[8.4,11.5], note:"B4 우벽 2.9u → 발판 11.5"},
+    {from:[3.5,17.0],to:[0.6,16.5], note:"히든 좌벽 3.2u → 발판 16.5"},
+  ],
+},
+{
+  n:7, id:"summit", name:"정상 성종", sub:"The Summit Bell",
+  yOff:68, w:16, h:9,
+  concept:"좁음→넓음 반전의 승리의 랩. 성종 타격 = 클리어.",
+  geo:[
+    {t:"solid", x:[0,16],     y:[0.2,0.5],  label:"성종 테라스 바닥"},
+    {t:"oneway",x:[4,6],      y:[0.2,0.5],  label:"첨탑 개구(진입)"},
+    {t:"wall",  x:[-0.2,0],   y:[0.5,2.4],  label:"좌 난간"},
+    {t:"wall",  x:[16,16.2],  y:[0.5,2.4],  label:"우 난간"},
+    {t:"solid", x:[0.6,2.8],  y:[1.3,1.6],  label:"좌측 전망 발코니"},
+    {t:"solid", x:[10,12.5],  y:[1.7,2.0],  label:"스텝 A"},
+    {t:"solid", x:[12.5,15.5],y:[3.2,3.5],  label:"종 대(플린스)"},
+    {t:"wall",  x:[12.6,12.9],y:[3.5,7.2],  label:"아치 좌기둥"},
+    {t:"wall",  x:[15.1,15.4],y:[3.5,7.2],  label:"아치 우기둥"},
+    {t:"spear", x:[12.9,15.1],y:[6.5,6.6],  face:"U", label:"종탑 대들보(플로리시)"},
+  ],
+  entry:{x:5.0,y:0.5,from:6},
+  goal:{x:[13.3,14.7], y:[4.8,6.2], label:"성종(목표)"},
+  shrines:[{x:2.5,y:0.5,id:"사당5",note:"정상 안착"}],
+  dummies:[ {x:7.0,y:0.5,k:"g"},{x:8.5,y:0.5,k:"g"},{x:11.0,y:3.4,k:"a"} ],
+},
+];
+
+/* 전역 경계 */
+const WORLD = (()=>{
+  let x0=0,x1=0,y0=0,y1=0;
+  for(const f of FLOORS){
+    x1=Math.max(x1,f.w); y1=Math.max(y1,f.yOff+f.h);
+    for(const g of f.geo){ x0=Math.min(x0,g.x[0]); x1=Math.max(x1,g.x[1]); }
+  }
+  return {x0,x1,y0,y1};
+})();
+
+/* ------------------------------------------------------------------ */
+/* 2. 유틸                                                             */
+/* ------------------------------------------------------------------ */
+function mulberry(seed){ return function(){
+  seed|=0; seed=seed+0x6D2B79F5|0;
+  let t=Math.imul(seed^seed>>>15,1|seed);
+  t=t+Math.imul(t^t>>>7,61|t)^t;
+  return ((t^t>>>14)>>>0)/4294967296; };}
+const clamp=(v,a,b)=>v<a?a:v>b?b:v;
+const lerp=(a,b,t)=>a+(b-a)*t;
+function rr(ctx,x,y,w,h,r){
+  r=Math.min(r,Math.abs(w)/2,Math.abs(h)/2);
+  ctx.beginPath();
+  ctx.moveTo(x+r,y); ctx.lineTo(x+w-r,y); ctx.quadraticCurveTo(x+w,y,x+w,y+r);
+  ctx.lineTo(x+w,y+h-r); ctx.quadraticCurveTo(x+w,y+h,x+w-r,y+h);
+  ctx.lineTo(x+r,y+h); ctx.quadraticCurveTo(x,y+h,x,y+h-r);
+  ctx.lineTo(x,y+r); ctx.quadraticCurveTo(x,y,x+r,y); ctx.closePath();
+}
+
+/* 팔레트 — 시간의 신전(리마스터) 룩: 대리석 은백 + 금세공 + 은청 빛결정 */
+const PAL = {
+  skyTop:"#1a2740", skyMid:"#3f5f86", skyLow:"#9fb6cd", skyHaze:"#e6d8bf",
+  marbleHi:"#f2f5fb", marble:"#cfd9e8", marbleLo:"#8e9db5", marbleDeep:"#5d6b83",
+  gold:"#e8c86a", goldHi:"#fff0bd", goldLo:"#a8842f",
+  crystal:"#8fdcf0", crystalDeep:"#2b7fa8", crystalGlow:"rgba(143,220,240,",
+  wall:"#41506b", wallHi:"#66799a",
+  oneway:"#d8c07f",
+};
+
+/* ------------------------------------------------------------------ */
+/* 3. 캔버스 / 카메라                                                  */
+/* ------------------------------------------------------------------ */
+const cv=document.getElementById("c"), ctx=cv.getContext("2d");
+let W=0,H=0,DPR=1;
+function resize(){
+  DPR=Math.min(2,window.devicePixelRatio||1);
+  W=window.innerWidth; H=window.innerHeight;
+  cv.width=W*DPR; cv.height=H*DPR; cv.style.width=W+"px"; cv.style.height=H+"px";
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+}
+window.addEventListener("resize",resize); resize();
+
+const cam={x:8,y:3,zoom:58,tx:8,ty:3,tzoom:58};
+function sx(wx){ return (wx-cam.x)*cam.zoom + W/2; }
+function sy(wy){ return H/2 - (wy-cam.y)*cam.zoom; }
+function wxAt(px){ return (px-W/2)/cam.zoom + cam.x; }
+function wyAt(py){ return (H/2-py)/cam.zoom + cam.y; }
+function focusFloor(n){
+  const f=FLOORS.find(a=>a.n===n); if(!f) return;
+  cam.tx=f.w/2; cam.ty=f.yOff+f.h/2;
+  cam.tzoom=clamp(Math.min(W/(f.w+3), H/(f.h+3)),18,150);
+  ui.floorFocus=n;
+}
+function overview(){
+  cam.tx=(WORLD.x1)/2; cam.ty=(WORLD.y1)/2;
+  cam.tzoom=Math.min(W/(WORLD.x1+4), H/(WORLD.y1+4));
+  ui.floorFocus=0;
+}
+
+/* ------------------------------------------------------------------ */
+/* 4. 입력                                                             */
+/* ------------------------------------------------------------------ */
+const keys={};
+const ui={labels:true, debug:false, grid:false, plan:true, floorFocus:1, help:true, mouse:{x:0,y:0}};
+addEventListener("keydown",e=>{
+  keys[e.key.toLowerCase()]=true;
+  const k=e.key.toLowerCase();
+  if(k>="1"&&k<="7") focusFloor(+k);
+  if(k==="o") overview();
+  if(k==="l") ui.labels=!ui.labels;
+  if(k==="k") ui.debug=!ui.debug;
+  if(k==="g") ui.grid=!ui.grid;
+  if(k==="p") ui.plan=!ui.plan;
+  if(k==="h") ui.help=!ui.help;
+  if(["arrowup","arrowdown","arrowleft","arrowright"," "].includes(k)) e.preventDefault();
+});
+addEventListener("keyup",e=>{ keys[e.key.toLowerCase()]=false; });
+let drag=null;
+cv.addEventListener("mousedown",e=>{ drag={px:e.clientX,py:e.clientY,cx:cam.tx,cy:cam.ty}; cv.classList.add("drag"); });
+addEventListener("mouseup",()=>{ drag=null; cv.classList.remove("drag"); });
+addEventListener("mousemove",e=>{
+  ui.mouse.x=e.clientX; ui.mouse.y=e.clientY;
+  if(drag){ cam.tx=drag.cx-(e.clientX-drag.px)/cam.zoom; cam.ty=drag.cy+(e.clientY-drag.py)/cam.zoom; }
+});
+cv.addEventListener("wheel",e=>{
+  e.preventDefault();
+  const f=Math.exp(-e.deltaY*0.0013);
+  cam.tzoom=clamp(cam.tzoom*f,6,220);
+},{passive:false});
+
+/* ------------------------------------------------------------------ */
+/* 5. 배경 — 하늘 · 구름 · 원경 신전                                    */
+/* ------------------------------------------------------------------ */
+const rnd=mulberry(20260807);
+const CLOUDS=[]; for(let i=0;i<90;i++){
+  CLOUDS.push({ x:rnd()*1.6-0.3, y:rnd()*1.15-0.05, s:0.5+rnd()*2.4,
+                d:0.10+rnd()*0.55, a:0.10+rnd()*0.32, ph:rnd()*99 });
+}
+const MOTES=[]; for(let i=0;i<120;i++){
+  MOTES.push({ x:rnd()*WORLD.x1, y:rnd()*WORLD.y1, r:0.02+rnd()*0.05,
+               sp:0.15+rnd()*0.5, ph:rnd()*99 });
+}
+const SPIRES=[]; for(let i=0;i<7;i++){
+  SPIRES.push({x:rnd(), w:0.03+rnd()*0.05, h:0.12+rnd()*0.28, d:0.14+rnd()*0.2});
+}
+
+function drawSky(T){
+  // 고도(카메라 y)에 따라 하늘이 밝아짐 — 상승 동기 시각화
+  const alt=clamp(cam.y/WORLD.y1,0,1);
+  const g=ctx.createLinearGradient(0,0,0,H);
+  g.addColorStop(0, mix(PAL.skyTop,"#2b4b78",alt));
+  g.addColorStop(0.45, mix(PAL.skyMid,"#7fa4cc",alt));
+  g.addColorStop(0.80, mix(PAL.skyLow,"#dfe9f2",alt*0.9));
+  g.addColorStop(1, mix("#7a8ba3",PAL.skyHaze,alt*0.85));
+  ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
+
+  // 태양 신광
+  const sunX=W*0.80, sunY=H*(0.16-alt*0.05);
+  const sg=ctx.createRadialGradient(sunX,sunY,0,sunX,sunY,Math.max(W,H)*0.55);
+  sg.addColorStop(0,`rgba(255,246,214,${0.34+alt*0.22})`);
+  sg.addColorStop(0.28,`rgba(255,226,168,${0.13+alt*0.10})`);
+  sg.addColorStop(1,"rgba(255,220,160,0)");
+  ctx.fillStyle=sg; ctx.fillRect(0,0,W,H);
+
+  // 원경 신전 첨탑 실루엣 (아주 느린 패럴랙스)
+  ctx.save();
+  for(const s of SPIRES){
+    const px=((s.x*1.4 - cam.x*0.008*s.d)%1.4+1.4)%1.4;
+    const X=px*W*1.1-W*0.05;
+    const baseY=H*0.66 + (cam.y*0.9*s.d);
+    const hh=H*s.h;
+    ctx.fillStyle=`rgba(122,146,178,${0.16+s.d*0.16})`;
+    ctx.fillRect(X, baseY-hh, W*s.w, hh);
+    ctx.beginPath(); ctx.moveTo(X-W*0.012,baseY-hh);
+    ctx.lineTo(X+W*s.w/2, baseY-hh-H*0.05);
+    ctx.lineTo(X+W*s.w+W*0.012, baseY-hh); ctx.closePath(); ctx.fill();
+  }
+  ctx.restore();
+
+  // 구름 바다 (다층 패럴랙스)
+  for(const c of CLOUDS){
+    const pxr=((c.x - cam.x*0.006*c.d)%1.5+1.5)%1.5;
+    const X=pxr*W*1.2-W*0.1;
+    const Y=(c.y*H*1.4) + cam.y*c.d*7 - H*0.12 + Math.sin(T*0.00013+c.ph)*6;
+    if(Y<-200||Y>H+200) continue;
+    const rw=W*0.10*c.s, rh=rw*0.30;
+    const cg=ctx.createRadialGradient(X,Y,0,X,Y,rw);
+    cg.addColorStop(0,`rgba(255,255,255,${c.a})`);
+    cg.addColorStop(0.55,`rgba(236,244,252,${c.a*0.55})`);
+    cg.addColorStop(1,"rgba(226,238,250,0)");
+    ctx.fillStyle=cg;
+    ctx.beginPath(); ctx.ellipse(X,Y,rw,rh,0,0,7); ctx.fill();
+  }
+}
+function mix(a,b,t){
+  const pa=parseInt(a.slice(1),16), pb=parseInt(b.slice(1),16);
+  const r=Math.round(lerp((pa>>16)&255,(pb>>16)&255,t));
+  const g=Math.round(lerp((pa>>8)&255,(pb>>8)&255,t));
+  const bl=Math.round(lerp(pa&255,pb&255,t));
+  return `rgb(${r},${g},${bl})`;
+}
+
+/* ------------------------------------------------------------------ */
+/* 6. 지오메트리 렌더                                                  */
+/* ------------------------------------------------------------------ */
+function drawChamber(f,T){
+  // 각 층 = 별개의 방(포탈 연결). 불투명한 어두운 신전 내부 → 대리석 지형이 도드라지게.
+  const x0=sx(-0.8), x1=sx(f.w+0.8);
+  const y1=sy(f.yOff-0.4), y0=sy(f.yOff+f.h+0.4);
+  const Wd=x1-x0, Hd=y1-y0;
+  if(x1<-40||x0>W+40||y1<-40||y0>H+40) return;
+  ctx.save();
+  ctx.beginPath(); ctx.rect(x0,y0,Wd,Hd); ctx.clip();
+
+  // 내부 벽면 (깊은 청슬레이트)
+  const g=ctx.createLinearGradient(0,y0,0,y1);
+  g.addColorStop(0,"#243149");
+  g.addColorStop(0.42,"#1b2438");
+  g.addColorStop(1,"#121a2b");
+  ctx.fillStyle=g; ctx.fillRect(x0,y0,Wd,Hd);
+
+  // 블라인드 아케이드(장식 아치 니치) — 신전 벽면
+  const z=cam.zoom;
+  if(z>10){
+    const step=Math.max(2.2, 3.0);
+    const aw=step*0.72*z, ah=Math.min(Hd*0.55, 3.2*z);
+    for(let ax=0; ax<f.w+step; ax+=step){
+      const AX=sx(ax+0.3), AY=y1-ah-Hd*0.06;
+      if(AX+aw<x0||AX>x1) continue;
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(AX,y1-Hd*0.06);
+      ctx.lineTo(AX,AY+aw*0.45);
+      ctx.quadraticCurveTo(AX+aw/2,AY-aw*0.12,AX+aw,AY+aw*0.45);
+      ctx.lineTo(AX+aw,y1-Hd*0.06); ctx.closePath();
+      const ag=ctx.createLinearGradient(0,AY,0,y1);
+      ag.addColorStop(0,"rgba(9,14,25,0.55)");
+      ag.addColorStop(1,"rgba(9,14,25,0.14)");
+      ctx.fillStyle=ag; ctx.fill();
+      ctx.strokeStyle="rgba(150,176,214,0.10)"; ctx.lineWidth=1.2; ctx.stroke();
+      ctx.restore();
+    }
+  }
+  // 코니스 수평선
+  ctx.strokeStyle="rgba(160,186,224,0.07)"; ctx.lineWidth=1;
+  for(let cy=2; cy<f.h; cy+=3){
+    const CY=sy(f.yOff+cy);
+    ctx.beginPath(); ctx.moveTo(x0,CY); ctx.lineTo(x1,CY); ctx.stroke();
+  }
+  // 상단 성광(출구 방향 유도)
+  const rg=ctx.createLinearGradient(0,y0,0,y0+Hd*0.45);
+  rg.addColorStop(0,"rgba(255,238,190,0.16)");
+  rg.addColorStop(1,"rgba(255,238,190,0)");
+  ctx.fillStyle=rg; ctx.fillRect(x0,y0,Wd,Hd*0.45);
+  ctx.restore();
+
+  // 방 테두리 금선
+  ctx.save();
+  ctx.strokeStyle="rgba(232,200,106,0.28)"; ctx.lineWidth=2;
+  ctx.strokeRect(x0,y0,Wd,Hd);
+  ctx.strokeStyle="rgba(10,16,28,0.6)"; ctx.lineWidth=1;
+  ctx.strokeRect(x0-1.5,y0-1.5,Wd+3,Hd+3);
+  ctx.restore();
+}
+
+function drawGodRays(f,T){
+  const z=cam.zoom;
+  if(z<14) return;
+  ctx.save(); ctx.globalCompositeOperation="lighter";
+  const n=4;
+  for(let i=0;i<n;i++){
+    const bx=f.w*(0.55+i*0.14), top=f.yOff+f.h;
+    const wTop=0.5+i*0.2, wBot=2.0+i*0.7;
+    const a=0.05+0.02*Math.sin(T*0.0004+i);
+    ctx.beginPath();
+    ctx.moveTo(sx(bx-wTop/2), sy(top));
+    ctx.lineTo(sx(bx+wTop/2), sy(top));
+    ctx.lineTo(sx(bx+wBot/2), sy(f.yOff));
+    ctx.lineTo(sx(bx-wBot/2), sy(f.yOff));
+    ctx.closePath();
+    const rg=ctx.createLinearGradient(0,sy(top),0,sy(f.yOff));
+    rg.addColorStop(0,`rgba(255,244,206,${a})`);
+    rg.addColorStop(1,"rgba(255,244,206,0)");
+    ctx.fillStyle=rg; ctx.fill();
+  }
+  ctx.restore();
+}
+
+/* 대리석 지형 블록 — 어두운 석재 몸체 + 밝은 대리석 상판 + 금 트림 (고대비) */
+function drawMarble(gx0,gy0,gx1,gy1,opt={}){
+  const z=cam.zoom;
+  // 지면 슬래브는 챔버 바닥까지 몸체를 늘려 "땅 덩어리"로 읽히게
+  const bot = (opt.massTo!=null && opt.massTo<gy0) ? opt.massTo : gy0;
+  const X=sx(gx0), Y=sy(gy1), Wd=(gx1-gx0)*z, Hd=Math.max((gy1-bot)*z, 4);
+  if(X>W+40||X+Wd<-40||Y>H+40||Y+Hd<-40) return;
+  const cap=Math.min(Hd*0.42, Math.max(3, z*0.14));   // 상판 두께
+  ctx.save();
+  // 접지 그림자
+  ctx.fillStyle="rgba(4,8,18,0.45)"; ctx.fillRect(X+2,Y+3,Wd,Hd);
+  // 몸체 (어두운 석재)
+  const g=ctx.createLinearGradient(0,Y,0,Y+Hd);
+  g.addColorStop(0,"#7d8daa"); g.addColorStop(0.28,"#61708e");
+  g.addColorStop(0.78,"#48566f"); g.addColorStop(1,"#3a4761");
+  ctx.fillStyle=g; ctx.fillRect(X,Y,Wd,Hd);
+  // 세로 석재 이음선
+  if(z>24&&Wd>20){
+    ctx.strokeStyle="rgba(12,18,30,0.35)"; ctx.lineWidth=1;
+    const n=Math.max(1,Math.floor(Wd/(z*0.9)));
+    for(let i=1;i<n;i++){ const bx=Math.round(X+Wd*i/n)+0.5;
+      ctx.beginPath(); ctx.moveTo(bx,Y+cap); ctx.lineTo(bx,Y+Hd); ctx.stroke(); }
+  }
+  // 밝은 대리석 상판
+  const cg=ctx.createLinearGradient(0,Y,0,Y+cap);
+  cg.addColorStop(0,PAL.marbleHi); cg.addColorStop(0.6,PAL.marble); cg.addColorStop(1,PAL.marbleLo);
+  ctx.fillStyle=cg; ctx.fillRect(X,Y,Wd,cap);
+  // 대리석 결
+  if(z>30&&Wd>26){
+    ctx.save(); ctx.beginPath(); ctx.rect(X,Y,Wd,cap); ctx.clip();
+    ctx.strokeStyle="rgba(120,140,170,0.35)"; ctx.lineWidth=1;
+    const rg=mulberry(Math.round(gx0*97+gy0*31));
+    for(let i=0;i<Math.max(2,Wd/46);i++){
+      const vx=X+rg()*Wd, vy=Y+rg()*cap;
+      ctx.beginPath(); ctx.moveTo(vx,vy); ctx.quadraticCurveTo(vx+10,vy+2,vx+22,vy-1); ctx.stroke();
+    }
+    ctx.restore();
+  }
+  // 금 트림 (상판 아래 경계)
+  ctx.fillStyle=PAL.gold;   ctx.fillRect(X,Y+cap,Wd,Math.max(1.4,z*0.028));
+  ctx.fillStyle=PAL.goldHi; ctx.fillRect(X,Y,Wd,Math.max(1,z*0.014));
+  // 좌우 베벨
+  ctx.fillStyle="rgba(255,255,255,0.10)"; ctx.fillRect(X,Y,Math.max(1,z*0.02),Hd);
+  ctx.fillStyle="rgba(6,10,20,0.35)";     ctx.fillRect(X+Wd-Math.max(1,z*0.02),Y,Math.max(1,z*0.02),Hd);
+  ctx.restore();
+}
+
+/* 한방향 발판 — 얇은 금테 + 반투명 성광 커튼(아래→위 통과 신호) */
+function drawOneway(gx0,gy0,gx1,gy1,T){
+  const X=sx(gx0), Y=sy(gy1), Wd=(gx1-gx0)*cam.zoom, Hd=Math.max((gy1-gy0)*cam.zoom,3);
+  if(X>W+40||X+Wd<-40) return;
+  ctx.save();
+  const g=ctx.createLinearGradient(0,Y,0,Y+Hd);
+  g.addColorStop(0,PAL.marbleHi); g.addColorStop(1,PAL.marbleLo);
+  ctx.fillStyle=g; rr(ctx,X,Y,Wd,Hd,2); ctx.fill();
+  ctx.fillStyle=PAL.oneway; ctx.fillRect(X,Y,Wd,Math.max(1.4,cam.zoom*0.03));
+  // 아래쪽 성광 커튼
+  const cg=ctx.createLinearGradient(0,Y+Hd,0,Y+Hd+cam.zoom*0.42);
+  const a=0.20+0.08*Math.sin(T*0.003);
+  cg.addColorStop(0,`rgba(255,238,190,${a})`); cg.addColorStop(1,"rgba(255,238,190,0)");
+  ctx.fillStyle=cg; ctx.fillRect(X,Y+Hd,Wd,cam.zoom*0.42);
+  ctx.restore();
+}
+
+/* 벽 / 기둥 — 세로 홈(fluting) + 금 캐피털 */
+function drawWall(gx0,gy0,gx1,gy1){
+  const X=sx(gx0), Y=sy(gy1), Wd=(gx1-gx0)*cam.zoom, Hd=(gy1-gy0)*cam.zoom;
+  if(X>W+40||X+Wd<-40||Y>H+40||Y+Hd<-40) return;
+  const z=cam.zoom;
+  ctx.save();
+  ctx.fillStyle="rgba(4,8,18,0.40)"; ctx.fillRect(X+2,Y+2,Wd,Hd);
+  const g=ctx.createLinearGradient(X,0,X+Wd,0);
+  g.addColorStop(0,"#232d42"); g.addColorStop(0.30,"#4a5A76");
+  g.addColorStop(0.55,"#3a4761"); g.addColorStop(1,"#1a2233");
+  ctx.fillStyle=g; ctx.fillRect(X,Y,Wd,Hd);
+  if(z>18&&Wd>7){
+    const n=Math.max(1,Math.floor(Wd/Math.max(7,z*0.16)));
+    for(let i=1;i<n;i++){ const fx=Math.round(X+Wd*i/n)+0.5;
+      ctx.strokeStyle="rgba(140,166,204,0.13)"; ctx.lineWidth=1;
+      ctx.beginPath(); ctx.moveTo(fx,Y+2); ctx.lineTo(fx,Y+Hd-2); ctx.stroke();
+      ctx.strokeStyle="rgba(8,12,22,0.32)";
+      ctx.beginPath(); ctx.moveTo(fx+1.4,Y+2); ctx.lineTo(fx+1.4,Y+Hd-2); ctx.stroke(); }
+  }
+  // 금 캐피털(상·하단 띠)
+  const cap=Math.max(2,z*0.055);
+  ctx.fillStyle=PAL.goldLo;
+  ctx.fillRect(X-Wd*0.12,Y,Wd*1.24,cap);
+  ctx.fillRect(X-Wd*0.12,Y+Hd-cap,Wd*1.24,cap);
+  ctx.fillStyle=PAL.gold;
+  ctx.fillRect(X-Wd*0.12,Y,Wd*1.24,Math.max(1,z*0.022));
+  ctx.restore();
+}
+
+/* 창 꽂기 면 — 은청 빛결정 광맥 (플레이어 유도 시그널) */
+function drawSpearFace(g,T){
+  const X=sx(g.x[0]), Y=sy(g.y[1]);
+  const Wd=Math.max((g.x[1]-g.x[0])*cam.zoom, 3), Hd=(g.y[1]-g.y[0])*cam.zoom;
+  if(X>W+60||X+Wd<-60) return;
+  ctx.save(); ctx.globalCompositeOperation="lighter";
+  const pulse=0.45+0.25*Math.sin(T*0.0022+g.y[0]);
+  // 면 자체 발광
+  const fg=ctx.createLinearGradient(X,0,X+Wd*(g.face==="L"?-2.2:2.2),0);
+  fg.addColorStop(0,`rgba(143,220,240,${0.42*pulse})`);
+  fg.addColorStop(1,"rgba(143,220,240,0)");
+  if(g.face==="U"){
+    const ug=ctx.createLinearGradient(0,Y,0,Y-cam.zoom*0.6);
+    ug.addColorStop(0,`rgba(143,220,240,${0.40*pulse})`); ug.addColorStop(1,"rgba(143,220,240,0)");
+    ctx.fillStyle=ug; ctx.fillRect(X,Y-cam.zoom*0.6,Wd,cam.zoom*0.6);
+  }else{
+    ctx.fillStyle=fg;
+    ctx.fillRect(g.face==="L"?X-Wd*2.2:X, Y, Wd*2.2, Hd);
+  }
+  ctx.restore();
+  // 광맥 라인
+  ctx.save();
+  ctx.strokeStyle=`rgba(180,238,255,${0.55+0.2*Math.sin(T*0.003)})`;
+  ctx.lineWidth=Math.max(1.5,cam.zoom*0.035);
+  ctx.beginPath();
+  if(g.face==="U"){ ctx.moveTo(X,Y); ctx.lineTo(X+Wd,Y); }
+  else{ const lx=g.face==="L"?X:X+Wd; ctx.moveTo(lx,Y); ctx.lineTo(lx,Y+Hd); }
+  ctx.stroke();
+  // 결정 노드
+  if(cam.zoom>16){
+    const steps=Math.max(2,Math.round((g.y[1]-g.y[0])));
+    for(let i=0;i<=steps;i++){
+      const t=i/steps;
+      const cx=g.face==="U"? lerp(X,X+Wd,t) : (g.face==="L"?X:X+Wd);
+      const cy=g.face==="U"? Y : lerp(Y,Y+Hd,t);
+      const r=(2.0+1.2*Math.sin(T*0.004+i))*Math.max(0.6,cam.zoom/48);
+      ctx.fillStyle="rgba(200,244,255,0.9)";
+      ctx.beginPath(); ctx.arc(cx,cy,r*0.5,0,7); ctx.fill();
+      ctx.fillStyle="rgba(143,220,240,0.28)";
+      ctx.beginPath(); ctx.arc(cx,cy,r*1.7,0,7); ctx.fill();
+    }
+  }
+  ctx.restore();
+}
+
+/* 도약 나브 — 첨탑 장식(finial) */
+function drawVault(g,T){
+  const cx=sx((g.x[0]+g.x[1])/2), top=sy(g.y[1]), bot=sy(g.y[0]);
+  const half=(g.x[1]-g.x[0])/2*cam.zoom;
+  ctx.save();
+  const gr=ctx.createLinearGradient(0,top,0,bot);
+  gr.addColorStop(0,PAL.goldHi); gr.addColorStop(0.5,PAL.gold); gr.addColorStop(1,PAL.goldLo);
+  ctx.fillStyle=gr;
+  ctx.beginPath(); ctx.moveTo(cx,top);
+  ctx.lineTo(cx+half,bot); ctx.lineTo(cx-half,bot); ctx.closePath(); ctx.fill();
+  ctx.fillStyle=`rgba(255,240,190,${0.25+0.12*Math.sin(T*0.004)})`;
+  ctx.beginPath(); ctx.arc(cx,top,half*1.5,0,7); ctx.fill();
+  ctx.restore();
+}
+
+/* 낙하존 — 소용돌이 구름 심연 */
+function drawFall(g,T){
+  const X=sx(g.x[0]), Wd=(g.x[1]-g.x[0])*cam.zoom;
+  const Y=sy(g.y[1]), Hd=Math.max((g.y[1]-g.y[0])*cam.zoom, cam.zoom*0.8);
+  if(X>W+40||X+Wd<-40) return;
+  ctx.save();
+  const dg=ctx.createLinearGradient(0,Y,0,Y+Hd*2.2);
+  dg.addColorStop(0,"rgba(30,44,70,0.0)");
+  dg.addColorStop(0.35,"rgba(24,36,60,0.55)");
+  dg.addColorStop(1,"rgba(10,18,34,0.92)");
+  ctx.fillStyle=dg; ctx.fillRect(X,Y,Wd,Hd*2.2);
+  // 흐르는 구름 결
+  ctx.globalAlpha=0.35;
+  for(let i=0;i<5;i++){
+    const yy=Y+Hd*0.25+i*Hd*0.34 + Math.sin(T*0.0006+i*1.7)*6;
+    const cg=ctx.createLinearGradient(X,yy,X+Wd,yy);
+    cg.addColorStop(0,"rgba(150,175,205,0)");
+    cg.addColorStop(0.5,`rgba(150,175,205,${0.20+0.08*Math.sin(T*0.001+i)})`);
+    cg.addColorStop(1,"rgba(150,175,205,0)");
+    ctx.fillStyle=cg;
+    ctx.beginPath(); ctx.ellipse(X+Wd/2,yy,Wd*0.55,Hd*0.13,0,0,7); ctx.fill();
+  }
+  ctx.restore();
+  // 위험 경계 라인
+  ctx.save();
+  ctx.strokeStyle="rgba(255,140,120,0.30)"; ctx.setLineDash([7,6]); ctx.lineWidth=1.5;
+  ctx.beginPath(); ctx.moveTo(X,Y); ctx.lineTo(X+Wd,Y); ctx.stroke();
+  ctx.restore();
+}
+
+/* 개방 우물(3층 중앙) — 낙하 트리거는 아니지만 깊이감 연출 */
+function drawAirWell(g,T){
+  const X=sx(g.x[0]), Wd=(g.x[1]-g.x[0])*cam.zoom;
+  const Y=sy(g.y[1]), Hd=(g.y[1]-g.y[0])*cam.zoom;
+  ctx.save();
+  const dg=ctx.createLinearGradient(0,Y,0,Y+Hd);
+  dg.addColorStop(0,"rgba(120,150,185,0.05)");
+  dg.addColorStop(1,"rgba(20,32,55,0.42)");
+  ctx.fillStyle=dg; ctx.fillRect(X,Y,Wd,Hd);
+  ctx.globalAlpha=0.30;
+  for(let i=0;i<4;i++){
+    const yy=Y+Hd*(0.4+i*0.18)+Math.sin(T*0.0007+i)*5;
+    ctx.fillStyle="rgba(190,212,236,0.16)";
+    ctx.beginPath(); ctx.ellipse(X+Wd/2,yy,Wd*0.42,Hd*0.05,0,0,7); ctx.fill();
+  }
+  ctx.restore();
+}
+
+/* ------------------------------------------------------------------ */
+/* 7. 오브젝트 — 사당 / 허수아비 / 빛결정 / 성종 / 포탈                 */
+/* ------------------------------------------------------------------ */
+function drawShrine(s,f,T){
+  const X=sx(s.x), Y=sy(f.yOff+s.y);
+  const z=cam.zoom, pulse=0.6+0.4*Math.sin(T*0.0022);
+  ctx.save(); ctx.globalCompositeOperation="lighter";
+  const bg=ctx.createLinearGradient(0,Y,0,Y-z*3.4);
+  bg.addColorStop(0,`rgba(255,226,150,${0.30*pulse})`);
+  bg.addColorStop(0.5,`rgba(255,226,150,${0.10*pulse})`);
+  bg.addColorStop(1,"rgba(255,226,150,0)");
+  ctx.fillStyle=bg; ctx.fillRect(X-z*0.42,Y-z*3.4,z*0.84,z*3.4);
+  ctx.restore();
+  // 바닥 금 문양
+  ctx.save();
+  ctx.strokeStyle=`rgba(240,206,120,${0.75*pulse})`; ctx.lineWidth=Math.max(1.4,z*0.035);
+  ctx.beginPath(); ctx.ellipse(X,Y,z*0.46,z*0.15,0,0,7); ctx.stroke();
+  ctx.beginPath(); ctx.ellipse(X,Y,z*0.26,z*0.085,0,0,7); ctx.stroke();
+  ctx.fillStyle=`rgba(255,242,200,${0.9*pulse})`;
+  ctx.beginPath(); ctx.arc(X,Y-z*0.10,Math.max(1.6,z*0.05),0,7); ctx.fill();
+  ctx.restore();
+}
+
+function drawDummy(d,f,T){
+  const X=sx(d.x), Y=sy(f.yOff+d.y), z=cam.zoom;
+  const hgt=z*0.95, wid=z*0.32;
+  ctx.save();
+  const bob = d.k==="a" ? Math.sin(T*0.0016+d.x)*z*0.05 : 0;
+  const yy=Y+bob;
+  // 공중형: 부유 링
+  if(d.k==="a"){
+    ctx.save(); ctx.globalCompositeOperation="lighter";
+    ctx.strokeStyle=`rgba(143,220,240,${0.30+0.15*Math.sin(T*0.003)})`;
+    ctx.lineWidth=Math.max(1,z*0.022);
+    ctx.beginPath(); ctx.ellipse(X,yy+z*0.10,z*0.38,z*0.11,0,0,7); ctx.stroke();
+    ctx.restore();
+  }
+  // 반격표적: 붉은/황금 예고 오라
+  if(d.k==="c"){
+    ctx.save(); ctx.globalCompositeOperation="lighter";
+    const p=0.5+0.5*Math.sin(T*0.0028);
+    const rg=ctx.createRadialGradient(X,yy-hgt*0.5,0,X,yy-hgt*0.5,z*0.9);
+    rg.addColorStop(0,`rgba(255,150,110,${0.26*p})`);
+    rg.addColorStop(1,"rgba(255,150,110,0)");
+    ctx.fillStyle=rg; ctx.beginPath(); ctx.arc(X,yy-hgt*0.5,z*0.9,0,7); ctx.fill();
+    ctx.restore();
+  }
+  // 기둥 몸체(대리석)
+  const g=ctx.createLinearGradient(X-wid/2,0,X+wid/2,0);
+  g.addColorStop(0,PAL.marbleLo); g.addColorStop(0.4,PAL.marbleHi); g.addColorStop(1,PAL.marbleLo);
+  ctx.fillStyle=g;
+  rr(ctx,X-wid/2, yy-hgt, wid, hgt, Math.max(1.5,z*0.05)); ctx.fill();
+  // 금 밴드
+  ctx.fillStyle = d.k==="c" ? "#e08a5a" : PAL.gold;
+  ctx.fillRect(X-wid*0.62, yy-hgt*0.72, wid*1.24, Math.max(1.6,z*0.05));
+  ctx.fillRect(X-wid*0.52, yy-hgt*0.30, wid*1.04, Math.max(1.4,z*0.04));
+  // 머리
+  ctx.fillStyle=PAL.marbleHi;
+  ctx.beginPath(); ctx.arc(X,yy-hgt-wid*0.28,wid*0.42,0,7); ctx.fill();
+  ctx.fillStyle=PAL.goldLo;
+  ctx.beginPath(); ctx.arc(X,yy-hgt-wid*0.28,wid*0.42,0,7); ctx.stroke();
+  // 벽걸이: 부착 브래킷
+  if(d.k==="w"){
+    ctx.fillStyle=PAL.goldLo;
+    ctx.fillRect(X-wid*0.9, yy-hgt*0.6, wid*0.5, Math.max(2,z*0.05));
+  }
+  ctx.restore();
+}
+
+function drawCrystal(cy,f,T){
+  const X=sx(cy.x), Y=sy(f.yOff+cy.y), z=cam.zoom;
+  const p=0.6+0.4*Math.sin(T*0.0026+cy.x);
+  const bob=Math.sin(T*0.0014+cy.y)*z*0.07;
+  ctx.save(); ctx.globalCompositeOperation="lighter";
+  const rg=ctx.createRadialGradient(X,Y+bob,0,X,Y+bob,z*0.85);
+  rg.addColorStop(0,`rgba(170,236,255,${0.55*p})`);
+  rg.addColorStop(0.4,`rgba(110,200,235,${0.20*p})`);
+  rg.addColorStop(1,"rgba(110,200,235,0)");
+  ctx.fillStyle=rg; ctx.beginPath(); ctx.arc(X,Y+bob,z*0.85,0,7); ctx.fill();
+  ctx.restore();
+  // 결정 본체 (다이아 실루엣)
+  const r=z*0.20;
+  ctx.save(); ctx.translate(X,Y+bob);
+  const g=ctx.createLinearGradient(0,-r,0,r);
+  g.addColorStop(0,"#eafcff"); g.addColorStop(0.45,PAL.crystal); g.addColorStop(1,PAL.crystalDeep);
+  ctx.fillStyle=g;
+  ctx.beginPath(); ctx.moveTo(0,-r*1.5); ctx.lineTo(r*0.72,-r*0.2);
+  ctx.lineTo(0,r*1.5); ctx.lineTo(-r*0.72,-r*0.2); ctx.closePath(); ctx.fill();
+  ctx.strokeStyle="rgba(255,255,255,0.7)"; ctx.lineWidth=1; ctx.stroke();
+  ctx.restore();
+}
+
+function drawBell(f,T){
+  const gl=f.goal; if(!gl) return;
+  const x0=sx(gl.x[0]), x1=sx(gl.x[1]);
+  const yTop=sy(f.yOff+gl.y[1]), yBot=sy(f.yOff+gl.y[0]);
+  const cx=(x0+x1)/2, bw=x1-x0, bh=yBot-yTop, z=cam.zoom;
+  ctx.save(); ctx.globalCompositeOperation="lighter";
+  const p=0.55+0.45*Math.sin(T*0.0015);
+  const rg=ctx.createRadialGradient(cx,(yTop+yBot)/2,0,cx,(yTop+yBot)/2,bw*1.7);
+  rg.addColorStop(0,`rgba(255,226,140,${0.34*p})`); rg.addColorStop(1,"rgba(255,226,140,0)");
+  ctx.fillStyle=rg; ctx.beginPath(); ctx.arc(cx,(yTop+yBot)/2,bw*1.7,0,7); ctx.fill();
+  ctx.restore();
+  // 종 본체
+  ctx.save();
+  const g=ctx.createLinearGradient(x0,0,x1,0);
+  g.addColorStop(0,"#8a6a28"); g.addColorStop(0.35,"#f0d281");
+  g.addColorStop(0.6,"#e0b855"); g.addColorStop(1,"#7d5f22");
+  ctx.fillStyle=g;
+  ctx.beginPath();
+  ctx.moveTo(cx-bw*0.16, yTop);
+  ctx.bezierCurveTo(cx-bw*0.50, yTop+bh*0.30, cx-bw*0.50, yBot-bh*0.10, cx-bw*0.50, yBot);
+  ctx.lineTo(cx+bw*0.50, yBot);
+  ctx.bezierCurveTo(cx+bw*0.50, yBot-bh*0.10, cx+bw*0.50, yTop+bh*0.30, cx+bw*0.16, yTop);
+  ctx.closePath(); ctx.fill();
+  // 림
+  ctx.fillStyle="#f6e2a6"; ctx.fillRect(x0-bw*0.04, yBot-Math.max(2,z*0.06), bw*1.08, Math.max(2.4,z*0.07));
+  // 성문 음각
+  ctx.strokeStyle="rgba(90,66,20,0.55)"; ctx.lineWidth=Math.max(1,z*0.02);
+  ctx.beginPath(); ctx.moveTo(x0+bw*0.08,yBot-bh*0.34); ctx.lineTo(x1-bw*0.08,yBot-bh*0.34); ctx.stroke();
+  // 크라운(상단 고리)
+  ctx.strokeStyle="#d9bb63"; ctx.lineWidth=Math.max(2,z*0.05);
+  ctx.beginPath(); ctx.arc(cx,yTop-z*0.10,z*0.13,Math.PI,0); ctx.stroke();
+  ctx.restore();
+}
+
+function drawPortal(px,py,label,T,dir){
+  const X=sx(px), Y=sy(py), z=cam.zoom;
+  const p=0.55+0.45*Math.sin(T*0.0024);
+  ctx.save(); ctx.globalCompositeOperation="lighter";
+  const g=ctx.createRadialGradient(X,Y-z*0.6,0,X,Y-z*0.6,z*1.1);
+  g.addColorStop(0,`rgba(180,226,255,${0.34*p})`);
+  g.addColorStop(1,"rgba(180,226,255,0)");
+  ctx.fillStyle=g; ctx.beginPath(); ctx.arc(X,Y-z*0.6,z*1.1,0,7); ctx.fill();
+  ctx.restore();
+  // 아치 문
+  ctx.save();
+  ctx.strokeStyle=`rgba(232,206,140,${0.85})`; ctx.lineWidth=Math.max(1.6,z*0.05);
+  ctx.beginPath();
+  ctx.moveTo(X-z*0.36,Y);
+  ctx.lineTo(X-z*0.36,Y-z*0.75);
+  ctx.quadraticCurveTo(X,Y-z*1.35,X+z*0.36,Y-z*0.75);
+  ctx.lineTo(X+z*0.36,Y);
+  ctx.stroke();
+  const ig=ctx.createLinearGradient(0,Y,0,Y-z*1.2);
+  ig.addColorStop(0,`rgba(196,232,255,${0.28*p})`); ig.addColorStop(1,"rgba(196,232,255,0.02)");
+  ctx.fillStyle=ig;
+  ctx.beginPath();
+  ctx.moveTo(X-z*0.36,Y); ctx.lineTo(X-z*0.36,Y-z*0.75);
+  ctx.quadraticCurveTo(X,Y-z*1.35,X+z*0.36,Y-z*0.75);
+  ctx.lineTo(X+z*0.36,Y); ctx.closePath(); ctx.fill();
+  ctx.restore();
+  if(ui.labels&&z>20){
+    ctx.save(); ctx.font=`600 ${Math.max(9,z*0.20)}px system-ui`;
+    ctx.textAlign="center"; ctx.fillStyle="rgba(226,240,255,0.85)";
+    ctx.fillText(label, X, Y-z*1.5); ctx.restore();
+  }
+}
+
+function drawSpawn(f,T){
+  if(!f.spawn) return;
+  const X=sx(f.spawn.x), Y=sy(f.yOff+f.spawn.y), z=cam.zoom;
+  ctx.save();
+  ctx.strokeStyle="rgba(255,238,180,0.9)"; ctx.lineWidth=Math.max(1.4,z*0.035);
+  ctx.beginPath(); ctx.moveTo(X,Y); ctx.lineTo(X,Y-z*0.9); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(X,Y-z*0.9); ctx.lineTo(X+z*0.42,Y-z*0.72);
+  ctx.lineTo(X,Y-z*0.55); ctx.closePath();
+  ctx.fillStyle="rgba(255,226,150,0.9)"; ctx.fill();
+  ctx.restore();
+  if(ui.labels&&z>18){
+    ctx.save(); ctx.font=`700 ${Math.max(9,z*0.19)}px system-ui`; ctx.textAlign="center";
+    ctx.fillStyle="rgba(255,240,200,0.95)"; ctx.fillText("★ 스폰", X, Y+z*0.42); ctx.restore();
+  }
+}
+
+/* 창꽂기 계획선 — 설계상 "어디서 어디로 던지나" (검증 시각화) */
+function drawSpearPlan(f,T){
+  if(!f.spearPlan) return;
+  const z=cam.zoom;
+  ctx.save();
+  ctx.setLineDash([6,5]); ctx.lineWidth=Math.max(1,z*0.022);
+  for(const p of f.spearPlan){
+    const ax=sx(p.from[0]), ay=sy(f.yOff+p.from[1]);
+    const bx=sx(p.to[0]),   by=sy(f.yOff+p.to[1]);
+    const dist=Math.hypot(p.to[0]-p.from[0], p.to[1]-p.from[1]);
+    const ok=dist<=REACH.spear;
+    ctx.strokeStyle= ok? "rgba(143,220,240,0.75)":"rgba(255,120,120,0.85)";
+    ctx.beginPath(); ctx.moveTo(ax,ay); ctx.lineTo(bx,by); ctx.stroke();
+    // 박힌 창(작은 레지) 표시
+    ctx.save(); ctx.setLineDash([]);
+    ctx.strokeStyle="rgba(232,240,255,0.9)"; ctx.lineWidth=Math.max(1.6,z*0.04);
+    ctx.beginPath(); ctx.moveTo(bx,by); ctx.lineTo(bx-z*0.55,by); ctx.stroke();
+    ctx.fillStyle="rgba(143,220,240,0.9)";
+    ctx.beginPath(); ctx.arc(bx-z*0.55,by,Math.max(1.5,z*0.05),0,7); ctx.fill();
+    ctx.restore();
+    if(ui.labels&&z>24){
+      ctx.save(); ctx.setLineDash([]);
+      ctx.font=`500 ${Math.max(8,z*0.16)}px system-ui`;
+      ctx.fillStyle= ok?"rgba(190,236,255,0.9)":"rgba(255,170,170,0.95)";
+      ctx.textAlign="left";
+      ctx.fillText(`${dist.toFixed(1)}u ${ok?"✓":"✗ 사거리초과"}`,(ax+bx)/2+4,(ay+by)/2-4);
+      ctx.restore();
+    }
+  }
+  ctx.restore();
+}
+
+/* ------------------------------------------------------------------ */
+/* 8. 라벨 / 디버그                                                    */
+/* ------------------------------------------------------------------ */
+const TYPE_COL={ solid:"#7fe3a0", oneway:"#ffd98a", wall:"#9aa8c4",
+                 spear:"#8fdcf0", vault:"#ffc86a", fall:"#ff8b7a",
+                 air:"#a7bcd8", deco:"#8d9bb2" };
+function drawDebugGeo(f){
+  ctx.save(); ctx.lineWidth=1;
+  for(const g of f.geo){
+    const X=sx(g.x[0]), Y=sy(f.yOff+g.y[1]);
+    const Wd=(g.x[1]-g.x[0])*cam.zoom, Hd=(g.y[1]-g.y[0])*cam.zoom;
+    ctx.strokeStyle=TYPE_COL[g.t]||"#fff";
+    ctx.setLineDash(g.t==="oneway"?[5,4]:[]);
+    ctx.strokeRect(X,Y,Wd,Math.max(Hd,2));
+  }
+  ctx.restore();
+}
+/* 비초점 층 디밍 — 현재 보는 층에 시선 집중 */
+function dimFloor(f){
+  const x0=sx(-0.8), x1=sx(f.w+0.8);
+  const y1=sy(f.yOff-0.4), y0=sy(f.yOff+f.h+0.4);
+  ctx.save(); ctx.fillStyle="rgba(7,12,22,0.58)";
+  ctx.fillRect(x0,y0,x1-x0,y1-y0); ctx.restore();
+}
+
+/* 라벨 — 겹침 회피(점유 사각형 추적) */
+const _lbBoxes=[];
+function labelSlot(X,Y,w,h){
+  for(let tryI=0;tryI<7;tryI++){
+    const yy=Y-tryI*(h+3);
+    let hit=false;
+    for(const b of _lbBoxes)
+      if(X<b.x+b.w+3 && X+w+3>b.x && yy<b.y+b.h+2 && yy+h+2>b.y){ hit=true; break; }
+    if(!hit){ _lbBoxes.push({x:X,y:yy,w,h}); return yy; }
+  }
+  return null;
+}
+function drawLabels(f){
+  const z=cam.zoom; if(z<24) return;
+  ctx.save();
+  const fs=Math.max(9,Math.min(14,z*0.16));
+  ctx.font=`600 ${fs}px system-ui`;
+  ctx.textAlign="left"; ctx.textBaseline="middle";
+  for(const g of f.geo){
+    if(g.t==="deco") continue;
+    const X=sx(g.x[0])+3, baseY=sy(f.yOff+g.y[1])-fs-6;
+    if(X<-200||X>W+40) continue;
+    const txt=`${g.label} · y${(f.yOff+g.y[1]).toFixed(1)}`;
+    const wpx=ctx.measureText(txt).width+10, hpx=fs+6;
+    const Y=labelSlot(X,baseY,wpx,hpx);
+    if(Y===null) continue;
+    ctx.fillStyle="rgba(6,11,20,0.80)"; rr(ctx,X,Y,wpx,hpx,3); ctx.fill();
+    ctx.strokeStyle=(TYPE_COL[g.t]||"#e8eefc")+"55"; ctx.lineWidth=1; ctx.stroke();
+    ctx.fillStyle= TYPE_COL[g.t]||"#e8eefc";
+    ctx.fillText(txt, X+5, Y+hpx/2+0.5);
+  }
+  ctx.restore();
+}
+/* 층 제목 — 챔버 '안쪽' 좌상단 배지 (윗층 것으로 오독되지 않게) */
+function drawFloorTitle(f){
+  const z=cam.zoom;
+  const X=sx(-0.8), Ytop=sy(f.yOff+f.h+0.4), Ybot=sy(f.yOff-0.4);
+  if(Ybot<0||Ytop>H) return;
+  const focus = (ui.floorFocus===0 || ui.floorFocus===f.n);
+  const s=Math.max(10,Math.min(22,z*0.36));
+  ctx.save();
+  ctx.textAlign="left"; ctx.textBaseline="middle";
+  const title=`${f.n}F  ${f.name}`;
+  ctx.font=`800 ${s}px system-ui`;
+  const tw=ctx.measureText(title).width;
+  const showSub = z>18 && focus;
+  const sub=`${f.sub} · ${f.w}×${f.h}u · 전역 y ${f.yOff}–${f.yOff+f.h}`;
+  ctx.font=`500 ${s*0.56}px system-ui`;
+  const sw=showSub?ctx.measureText(sub).width:0;
+  const bw=Math.max(tw,sw)+22, bh=showSub? s*1.95 : s*1.25;
+  const bx=Math.max(4,X+8), by=Math.max(62,Ytop+8);
+  // 배지
+  const g=ctx.createLinearGradient(bx,by,bx,by+bh);
+  g.addColorStop(0,"rgba(12,19,33,0.92)"); g.addColorStop(1,"rgba(12,19,33,0.70)");
+  ctx.fillStyle=g; rr(ctx,bx,by,bw,bh,5); ctx.fill();
+  ctx.fillStyle= focus? "rgba(232,200,106,0.9)":"rgba(232,200,106,0.32)";
+  ctx.fillRect(bx,by,3.5,bh);
+  ctx.font=`800 ${s}px system-ui`;
+  ctx.fillStyle= focus? "rgba(255,238,186,0.98)":"rgba(255,238,186,0.42)";
+  ctx.fillText(title, bx+12, by+(showSub? s*0.72 : bh/2));
+  if(showSub){
+    ctx.font=`500 ${s*0.56}px system-ui`;
+    ctx.fillStyle="rgba(186,208,240,0.72)";
+    ctx.fillText(sub, bx+12, by+s*1.42);
+  }
+  ctx.restore();
+}
+function drawGrid(){
+  if(!ui.grid) return;
+  const z=cam.zoom;
+  const step = z<14?5:(z<34?2:1);
+  ctx.save(); ctx.lineWidth=1;
+  const wx0=Math.floor(wxAt(0)/step)*step, wx1=wxAt(W);
+  const wy0=Math.floor(wyAt(H)/step)*step, wy1=wyAt(0);
+  ctx.strokeStyle="rgba(160,190,230,0.10)";
+  for(let x=wx0;x<=wx1;x+=step){ const X=sx(x);
+    ctx.beginPath(); ctx.moveTo(X,0); ctx.lineTo(X,H); ctx.stroke(); }
+  for(let y=wy0;y<=wy1;y+=step){ const Y=sy(y);
+    ctx.beginPath(); ctx.moveTo(0,Y); ctx.lineTo(W,Y); ctx.stroke(); }
+  if(z>26){
+    ctx.fillStyle="rgba(160,190,230,0.45)"; ctx.font="10px system-ui";
+    for(let x=wx0;x<=wx1;x+=step) ctx.fillText(x.toFixed(0), sx(x)+2, H-4);
+    for(let y=wy0;y<=wy1;y+=step) ctx.fillText(y.toFixed(0), 3, sy(y)-2);
+  }
+  ctx.restore();
+}
+
+/* ------------------------------------------------------------------ */
+/* 9. HUD — 미니맵 · 정보 · 게이팅 검증                                */
+/* ------------------------------------------------------------------ */
+function gatingChecks(){
+  const F=n=>FLOORS.find(f=>f.n===n);
+  const out=[];
+  // ① 3층 필수 갭
+  out.push({t:"3F R1→R2 갭 3.6u > 이단 2.9u", ok:3.6>REACH.doubleJump});
+  out.push({t:"3F R2→R3 갭 4.4u > 이단 2.9u", ok:4.4>REACH.doubleJump});
+  // ② 4층 스킵 차단
+  out.push({t:"4F 시작→먼기둥 8.9u > 사거리 5u", ok:8.9>REACH.spear});
+  // ③ 5층 D-A2 창발판 강제
+  out.push({t:"5F D-A2 4.3u > 지상 이단 3.9u", ok:4.3>1.0+REACH.doubleJump});
+  // 창꽂기 계획 사거리
+  let planOK=true, planN=0;
+  for(const f of FLOORS) for(const p of (f.spearPlan||[])){
+    planN++;
+    if(Math.hypot(p.to[0]-p.from[0],p.to[1]-p.from[1])>REACH.spear) planOK=false;
+  }
+  out.push({t:`창꽂기 계획 ${planN}건 전부 사거리 5u 이내`, ok:planOK});
+  return out;
+}
+const CHECKS=gatingChecks();
+
+function drawMinimap(){
+  const mw=104, mh=H-150, mx=W-mw-16, my=76;
+  const s=Math.min(mw/(WORLD.x1+2), mh/(WORLD.y1+2));
+  ctx.save();
+  ctx.fillStyle="rgba(8,14,26,0.62)"; rr(ctx,mx-8,my-8,mw+16,mh+16,10); ctx.fill();
+  ctx.strokeStyle="rgba(232,200,106,0.25)"; ctx.lineWidth=1; ctx.stroke();
+  const MX=x=>mx+(x+1)*s, MY=y=>my+mh-(y+1)*s;
+  for(const f of FLOORS){
+    ctx.fillStyle= f.n===ui.floorFocus? "rgba(255,226,150,0.22)":"rgba(150,180,220,0.10)";
+    ctx.fillRect(MX(0),MY(f.yOff+f.h),f.w*s,f.h*s);
+    for(const g of f.geo){
+      if(g.t==="air"||g.t==="deco") continue;
+      ctx.fillStyle= g.t==="fall"?"rgba(255,120,100,0.55)"
+                   : g.t==="spear"?"rgba(143,220,240,0.85)"
+                   : g.t==="wall"?"rgba(140,158,190,0.5)":"rgba(230,240,255,0.72)";
+      ctx.fillRect(MX(g.x[0]),MY(f.yOff+g.y[1]),Math.max(1,(g.x[1]-g.x[0])*s),Math.max(1,(g.y[1]-g.y[0])*s));
+    }
+    ctx.fillStyle="rgba(255,236,180,0.55)"; ctx.font="8px system-ui"; ctx.textAlign="right";
+    ctx.fillText(f.n+"F", mx+mw, MY(f.yOff)-1);
+  }
+  // 시야 사각형 (미니맵 영역으로 클램프)
+  const vx0=clamp(wxAt(0),-1,WORLD.x1+1), vx1=clamp(wxAt(W),-1,WORLD.x1+1);
+  const vy0=clamp(wyAt(H),-1,WORLD.y1+1), vy1=clamp(wyAt(0),-1,WORLD.y1+1);
+  ctx.save();
+  ctx.beginPath(); ctx.rect(mx-4,my-4,mw+8,mh+8); ctx.clip();
+  ctx.strokeStyle="rgba(255,255,255,0.9)"; ctx.lineWidth=1.4;
+  ctx.strokeRect(MX(vx0),MY(vy1),Math.max(2,(vx1-vx0)*s),Math.max(2,(vy1-vy0)*s));
+  ctx.restore();
+  ctx.restore();
+}
+
+function drawHUD(T){
+  // 상단 타이틀 바
+  ctx.save();
+  const g=ctx.createLinearGradient(0,0,0,58);
+  g.addColorStop(0,"rgba(8,13,24,0.86)"); g.addColorStop(1,"rgba(8,13,24,0)");
+  ctx.fillStyle=g; ctx.fillRect(0,0,W,58);
+  ctx.font="800 17px system-ui"; ctx.textAlign="left";
+  ctx.fillStyle="#f3e2b0";
+  ctx.fillText("성창 — 잊힌 성물 · 「신전 수련장」", 18, 26);
+  ctx.font="500 11.5px system-ui"; ctx.fillStyle="rgba(186,208,238,0.85)";
+  ctx.fillText(`맵 프로토 v1.0 · 전역 ${WORLD.x1}×${WORLD.y1}u · 7층 · 캐릭터 미구현(맵 뷰어)`, 18, 44);
+  ctx.restore();
+
+  // 커서 좌표
+  const wx=wxAt(ui.mouse.x), wy=wyAt(ui.mouse.y);
+  const f=FLOORS.find(a=>wy>=a.yOff&&wy<a.yOff+a.h);
+  ctx.save();
+  ctx.font="600 12px ui-monospace,monospace"; ctx.textAlign="left";
+  ctx.fillStyle="rgba(8,14,26,0.66)"; rr(ctx,14,H-34,286,24,6); ctx.fill();
+  ctx.fillStyle="rgba(200,224,255,0.95)";
+  ctx.fillText(`전역 (${wx.toFixed(2)}, ${wy.toFixed(2)})`, 22, H-18);
+  if(f) ctx.fillText(`${f.n}F 로컬 y ${(wy-f.yOff).toFixed(2)}`, 168, H-18);
+  ctx.restore();
+
+  // 도움말 / 검증 패널
+  if(ui.help){
+    const lines=[
+      ["카메라","드래그 · WASD/방향키 · 휠 줌"],
+      ["층 이동","1~7  ·  O 전체 조망"],
+      ["토글","L 라벨 · K 콜리전 · G 그리드 · P 창꽂기선 · H 도움말"],
+    ];
+    ctx.save();
+    const pw=306, ph=30+lines.length*17+10+CHECKS.length*15+22;
+    const px=14, py=76;
+    ctx.fillStyle="rgba(8,14,26,0.72)"; rr(ctx,px,py,pw,ph,10); ctx.fill();
+    ctx.strokeStyle="rgba(232,200,106,0.20)"; ctx.lineWidth=1; ctx.stroke();
+    ctx.textAlign="left";
+    ctx.font="700 11px system-ui"; ctx.fillStyle="#f0dda8";
+    ctx.fillText("조작", px+12, py+20);
+    ctx.font="500 11px system-ui";
+    let yy=py+36;
+    for(const [k,v] of lines){
+      ctx.fillStyle="rgba(255,226,150,0.85)"; ctx.fillText(k, px+12, yy);
+      ctx.fillStyle="rgba(196,216,244,0.88)"; ctx.fillText(v, px+62, yy);
+      yy+=17;
+    }
+    yy+=8;
+    ctx.font="700 11px system-ui"; ctx.fillStyle="#f0dda8";
+    ctx.fillText("게이팅 무결성 검증", px+12, yy); yy+=16;
+    ctx.font="500 10.5px system-ui";
+    for(const c of CHECKS){
+      ctx.fillStyle= c.ok? "#7fe3a0":"#ff8b7a";
+      ctx.fillText(c.ok?"✓":"✗", px+12, yy);
+      ctx.fillStyle="rgba(196,216,244,0.86)";
+      ctx.fillText(c.t, px+26, yy); yy+=15;
+    }
+    ctx.restore();
+  }
+
+  // 현재 층 컨셉 배너
+  const cf=FLOORS.find(a=>a.n===ui.floorFocus);
+  if(cf){
+    ctx.save();
+    const txt=`${cf.n}F ${cf.name} — ${cf.concept}`;
+    ctx.font="600 12px system-ui";
+    const wpx=ctx.measureText(txt).width;
+    const bx=(W-wpx-28)/2;
+    ctx.fillStyle="rgba(8,14,26,0.70)"; rr(ctx,bx,H-72,wpx+28,26,8); ctx.fill();
+    ctx.strokeStyle="rgba(232,200,106,0.22)"; ctx.stroke();
+    ctx.fillStyle="rgba(232,240,255,0.92)"; ctx.textAlign="left";
+    ctx.fillText(txt,bx+14,H-54);
+    ctx.restore();
+  }
+}
+
+/* 비네트 */
+function drawVignette(){
+  ctx.save();
+  const g=ctx.createRadialGradient(W/2,H/2,Math.min(W,H)*0.35,W/2,H/2,Math.max(W,H)*0.78);
+  g.addColorStop(0,"rgba(0,0,0,0)"); g.addColorStop(1,"rgba(4,8,18,0.55)");
+  ctx.fillStyle=g; ctx.fillRect(0,0,W,H); ctx.restore();
+}
+
+/* ------------------------------------------------------------------ */
+/* 10. 메인 루프                                                       */
+/* ------------------------------------------------------------------ */
+let last=performance.now();
+function frame(T){
+  const dt=Math.min(50,T-last); last=T;
+
+  // 카메라 입력
+  const sp=(keys["shift"]?2.4:1)*dt*0.018*(60/cam.zoom)*22;
+  if(keys["a"]||keys["arrowleft"])  cam.tx-=sp;
+  if(keys["d"]||keys["arrowright"]) cam.tx+=sp;
+  if(keys["w"]||keys["arrowup"])    cam.ty+=sp;
+  if(keys["s"]||keys["arrowdown"])  cam.ty-=sp;
+  if(keys["="]||keys["+"]) cam.tzoom=clamp(cam.tzoom*1.03,6,220);
+  if(keys["-"]||keys["_"]) cam.tzoom=clamp(cam.tzoom/1.03,6,220);
+  const k=1-Math.pow(0.001,dt/1000);
+  cam.x=lerp(cam.x,cam.tx,k); cam.y=lerp(cam.y,cam.ty,k);
+  cam.zoom=lerp(cam.zoom,cam.tzoom,k);
+
+  drawSky(T);
+
+  // 화면에 걸치는 층만 렌더
+  const vy0=wyAt(H)-2, vy1=wyAt(0)+2;
+  const vis=FLOORS.filter(f=>f.yOff+f.h>vy0 && f.yOff<vy1);
+
+  for(const f of vis) drawChamber(f,T);
+  for(const f of vis) drawGodRays(f,T);
+
+  // 배경 장식 기둥
+  for(const f of vis) if(f.pillars) for(const p of f.pillars){
+    ctx.save(); ctx.globalAlpha=0.42;
+    drawWall(p.x-p.w/2, f.yOff+p.y0, p.x+p.w/2, f.yOff+p.y1);
+    ctx.restore();
+  }
+
+  // 낙하존 / 우물 (지형 뒤)
+  for(const f of vis) for(const g of f.geo){
+    if(g.t==="fall") drawFall({x:g.x,y:[f.yOff+g.y[0],f.yOff+g.y[1]]},T);
+    if(g.t==="air")  drawAirWell({x:g.x,y:[f.yOff+g.y[0],f.yOff+g.y[1]]},T);
+  }
+
+  // 지형
+  for(const f of vis) for(const g of f.geo){
+    const y0=f.yOff+g.y[0], y1=f.yOff+g.y[1];
+    const mass = (g.y[0]<=0.25) ? f.yOff-0.4 : null;   // 챔버 바닥 접지 슬래브
+    switch(g.t){
+      case "solid": drawMarble(g.x[0],y0,g.x[1],y1,{massTo:mass}); break;
+      case "deco":  ctx.save(); ctx.globalAlpha=0.7;
+                    drawMarble(g.x[0],y0,g.x[1],y1); ctx.restore(); break;
+      case "wall":  drawWall(g.x[0],y0,g.x[1],y1); break;
+      case "oneway":drawOneway(g.x[0],y0,g.x[1],y1,T); break;
+      case "vault": drawVault({x:g.x,y:[y0,y1]},T); break;
+    }
+  }
+  // 창꽂기 면(발광 — 지형 위)
+  for(const f of vis) for(const g of f.geo)
+    if(g.t==="spear") drawSpearFace({x:g.x,y:[f.yOff+g.y[0],f.yOff+g.y[1]],face:g.face},T);
+
+  // 오브젝트
+  for(const f of vis){
+    if(f.shrines) for(const s of f.shrines) drawShrine(s,f,T);
+    if(f.dummies) for(const d of f.dummies) drawDummy(d,f,T);
+    if(f.crystals)for(const c of f.crystals) drawCrystal(c,f,T);
+    if(f.goal) drawBell(f,T);
+    drawSpawn(f,T);
+    if(f.entry) drawPortal(f.entry.x, f.yOff+f.entry.y, `↓ ${f.entry.from}F에서`, T);
+    if(f.exit)  drawPortal(f.exit.x,  f.yOff+f.exit.y,  f.exit.physical?`↑ ${f.exit.to}F (통과)`:`↑ ${f.exit.to}F로`, T);
+    if(ui.plan) drawSpearPlan(f,T);
+  }
+
+  // 부유 빛 입자
+  ctx.save(); ctx.globalCompositeOperation="lighter";
+  for(const m of MOTES){
+    const my=(m.y + (T*0.00004*m.sp))%WORLD.y1;
+    const X=sx(m.x), Y=sy(my+Math.sin(T*0.0009+m.ph)*0.12);
+    if(X<-20||X>W+20||Y<-20||Y>H+20) continue;
+    const a=0.18+0.16*Math.sin(T*0.002+m.ph);
+    ctx.fillStyle=`rgba(214,238,255,${a})`;
+    ctx.beginPath(); ctx.arc(X,Y,Math.max(0.8,m.r*cam.zoom),0,7); ctx.fill();
+  }
+  ctx.restore();
+
+  // 비초점 층 디밍
+  if(ui.floorFocus>0) for(const f of vis) if(f.n!==ui.floorFocus) dimFloor(f);
+
+  drawGrid();
+  if(ui.debug) for(const f of vis) drawDebugGeo(f);
+  _lbBoxes.length=0;
+  if(ui.labels){
+    const order=[...vis].sort((a,b)=>(b.n===ui.floorFocus)-(a.n===ui.floorFocus));
+    for(const f of order) drawLabels(f);
+  }
+  for(const f of vis) drawFloorTitle(f);
+
+  drawVignette();
+  drawMinimap();
+  drawHUD(T);
+
+  requestAnimationFrame(frame);
+}
+focusFloor(1);
+cam.x=cam.tx; cam.y=cam.ty; cam.zoom=cam.tzoom;
+requestAnimationFrame(frame);
+
+/* 헤드리스 테스트용 노출 */
+window.__MAP__={FLOORS,WORLD,REACH,CHECKS,cam,focusFloor,overview,ui};
+</script>
